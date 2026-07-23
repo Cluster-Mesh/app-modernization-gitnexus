@@ -4,6 +4,7 @@ import path from 'node:path';
 const mockAccess = vi.fn();
 const mockGetStoragePaths = vi.fn();
 const mockLoadMeta = vi.fn();
+const mockSaveMeta = vi.fn();
 const mockRegisterRepo = vi.fn();
 const mockEnsureGitNexusIgnored = vi.fn();
 const mockGetGitRoot = vi.fn();
@@ -19,6 +20,7 @@ vi.mock('../../src/storage/repo-manager.js', () => ({
   getStoragePaths: mockGetStoragePaths,
   INDEX_METADATA_FILE: 'gitnexus.json',
   loadMeta: mockLoadMeta,
+  saveMeta: mockSaveMeta,
   registerRepo: mockRegisterRepo,
   ensureGitNexusIgnored: mockEnsureGitNexusIgnored,
 }));
@@ -53,6 +55,7 @@ describe('indexCommand', () => {
       indexedAt: '2026-03-20T00:00:00.000Z',
       stats: { nodes: 10, edges: 20 },
     });
+    mockSaveMeta.mockResolvedValue(undefined);
     mockAccess.mockResolvedValue(undefined);
     mockEnsureGitNexusIgnored.mockResolvedValue(undefined);
     mockGetGitRoot.mockReturnValue(resolvedRepo);
@@ -120,6 +123,14 @@ describe('indexCommand', () => {
     await indexCommand(['/repo'], { force: true });
 
     expect(mockRegisterRepo).toHaveBeenCalledTimes(1);
+    expect(mockSaveMeta).toHaveBeenCalledTimes(1);
+    expect(mockSaveMeta).toHaveBeenCalledWith(
+      `${resolvedRepo}/.gitnexus`,
+      expect.objectContaining({
+        repoPath: resolvedRepo,
+        lastCommit: '',
+      }),
+    );
     expect(mockRegisterRepo).toHaveBeenCalledWith(
       resolvedRepo,
       expect.objectContaining({
@@ -142,6 +153,7 @@ describe('indexCommand', () => {
     await indexCommand(['/repo'], { force: true });
 
     expect(mockRegisterRepo).toHaveBeenCalledTimes(1);
+    expect(mockSaveMeta).toHaveBeenCalledTimes(1);
     expect(mockRegisterRepo).toHaveBeenCalledWith(
       resolvedRepo,
       expect.objectContaining({
@@ -172,6 +184,7 @@ describe('indexCommand', () => {
     await indexCommand(['/repo']);
 
     expect(mockRegisterRepo).toHaveBeenCalledTimes(1);
+    expect(mockSaveMeta).not.toHaveBeenCalled();
     expect(mockRegisterRepo).toHaveBeenCalledWith(
       resolvedRepo,
       expect.objectContaining({ repoPath: resolvedRepo }),

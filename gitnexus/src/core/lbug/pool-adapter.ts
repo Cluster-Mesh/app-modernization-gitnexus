@@ -461,6 +461,15 @@ const WAITER_TIMEOUT_MS = 15_000;
 const LOCK_RETRY_ATTEMPTS = 3;
 const LOCK_RETRY_DELAY_MS = 2000;
 const SHADOW_REPLAY_PROBE_QUERY = 'MATCH (n) RETURN n LIMIT 1';
+// A read-only `MATCH` probe does not force LadybugDB to actually replay
+// pending shadow pages — the native engine only performs the replay as part
+// of a real write-transaction commit, not merely on connection open. Without
+// this, `replayShadowPagesWithWritableOpen` below would open writable, run a
+// read query that appears to "succeed" without truly flushing the shadow
+// pages to disk, close, and reopen read-only — hitting the same read-only
+// shadow-replay error forever (#2382 follow-up: live AKS repro showed the
+// recovery loop never converges).
+const SHADOW_REPLAY_CHECKPOINT_QUERY = 'CHECKPOINT';
 
 const poolSidecarLogger = {
   warn: (message: string): void => {
@@ -540,11 +549,34 @@ async function probeDatabaseForShadowReplay(db: lbug.Database): Promise<void> {
   }
 }
 
+/**
+ * Force a real write-transaction commit (`CHECKPOINT`) on a writable
+ * Database handle so LadybugDB actually replays any pending shadow pages
+ * to disk, instead of merely probing with a read query. See
+ * {@link SHADOW_REPLAY_CHECKPOINT_QUERY} for why the read-only probe alone
+ * is insufficient here.
+ */
+async function forceShadowReplayCheckpoint(db: lbug.Database): Promise<void> {
+  const conn = createConnection(db);
+  try {
+    const queryResult = await conn.query(SHADOW_REPLAY_CHECKPOINT_QUERY);
+    const result = Array.isArray(queryResult) ? queryResult[0] : queryResult;
+    await result.getAll();
+    result.close?.();
+  } finally {
+    await conn.close().catch(() => {});
+  }
+}
+
 async function replayShadowPagesWithWritableOpen(dbPath: string): Promise<void> {
   let db: lbug.Database | undefined;
   try {
     db = createLbugDatabase(lbug, toNativeSafePath(dbPath), { throwOnWalReplayFailure: false });
     await db.init();
+    // Order matters: CHECKPOINT first to force the actual shadow-page
+    // replay via a real write-transaction commit, then the read probe as a
+    // sanity check that the database is genuinely queryable afterward.
+    await forceShadowReplayCheckpoint(db);
     await probeDatabaseForShadowReplay(db);
   } catch (err) {
     if (isMissingShadowSidecarError(err)) {
@@ -573,8 +605,18 @@ async function openReadOnlyDatabase(dbPath: string): Promise<lbug.Database> {
       readOnly: true,
       throwOnWalReplayFailure: false,
     });
-    await db.init();
     try {
+      // `db.init()` performs LadybugDB's actual native initialization and is
+      // where the read-only shadow-replay invariant (and missing-shadow-
+      // sidecar) checks really fire — NOT merely on the subsequent probe
+      // query below. It must be inside this try/catch together with the
+      // probe so errors thrown by init() also reach the classification/
+      // recovery logic; previously init() sat above this try/catch, so its
+      // errors fell straight through to the outer catch and skipped
+      // recovery entirely (live AKS repro: the writable CHECKPOINT recovery
+      // path was never invoked because init() — not the probe — was the one
+      // throwing).
+      await db.init();
       await probeDatabaseForShadowReplay(db);
     } catch (err) {
       if (isMissingShadowSidecarError(err)) {

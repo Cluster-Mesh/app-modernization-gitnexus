@@ -13,8 +13,16 @@
  *   - https://gitnexus.vercel.app     → allowed
  *   - Everything else                 → rejected
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { isAllowedOrigin } from '../../src/server/api.js';
+
+beforeEach(() => {
+  vi.unstubAllEnvs();
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 // ─── No origin (non-browser / curl) ──────────────────────────────────
 
@@ -179,5 +187,14 @@ describe('isAllowedOrigin: rejected origins', () => {
     expect(isAllowedOrigin('http://192.168.1.100')).toBe(true);
     expect(isAllowedOrigin('https://10.0.0.50')).toBe(true);
     expect(isAllowedOrigin('http://172.16.5.1:3000')).toBe(true);
+  });
+
+  it('allows explicitly configured origins from env', () => {
+    vi.stubEnv(
+      'GITNEXUS_CORS_EXTRA_ORIGINS',
+      'http://4.166.139.144:4173, https://internal-ui.example.com',
+    );
+    expect(isAllowedOrigin('http://4.166.139.144:4173')).toBe(true);
+    expect(isAllowedOrigin('https://internal-ui.example.com')).toBe(true);
   });
 });

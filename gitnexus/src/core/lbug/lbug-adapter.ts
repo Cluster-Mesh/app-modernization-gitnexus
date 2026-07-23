@@ -616,6 +616,15 @@ const ensureReadOnlyConnectionUsable = async (
   }
   let missingShadowError: unknown;
   try {
+    // A read-only probe query does not force LadybugDB to actually replay
+    // pending shadow pages \u2014 the native engine only performs the replay as
+    // part of a real write-transaction commit, not merely on connection
+    // open. Without the CHECKPOINT here, this writable reopen would run a
+    // read query that appears to "succeed" without truly flushing the
+    // shadow pages to disk, then the caller reopens read-only and hits the
+    // exact same shadow-replay error forever (live AKS repro, #2382
+    // follow-up).
+    await queryAndDrain(writable.conn, 'CHECKPOINT');
     await queryAndDrain(writable.conn, READ_ONLY_SHADOW_REPLAY_PROBE);
   } catch (err) {
     if (isMissingShadowSidecarError(err)) {

@@ -57,9 +57,21 @@ import { UPLOAD_ROOT } from './upload-paths.js';
 import { sweepStaleUploads } from './upload-sweep.js';
 import { isRfc1918PrivateIpv4 } from './private-ip.js';
 import { logger, flushLoggerSync } from '../core/logger.js';
+import {
+  getDefaultGitnexusDir,
+  getGroupDir,
+  listGroups,
+  createGroupDir,
+} from '../core/group/storage.js';
+import { loadGroupConfig, GroupNotFoundError } from '../core/group/config-parser.js';
+import { syncGroup } from '../core/group/sync.js';
+import { WikiJobManager } from './wiki-job.js';
+import { WikiGenerator } from '../core/wiki/generator.js';
+import { resolveLLMConfig, type LLMProvider } from '../core/wiki/llm-client.js';
 
 const _require = createRequire(import.meta.url);
 const pkg = _require('../../package.json');
+const yaml = _require('js-yaml') as typeof import('js-yaml');
 
 /**
  * Determine whether an HTTP Origin header value is allowed by CORS policy.
@@ -73,6 +85,7 @@ const pkg = _require('../../package.json');
  *     172.16.0.0/12   → 172.16.x.x – 172.31.x.x
  *     192.168.0.0/16  → 192.168.x.x
  * - https://gitnexus.vercel.app — the deployed GitNexus web UI
+ * - Any origin listed in env `GITNEXUS_CORS_EXTRA_ORIGINS` (comma-separated)
  *
  * @param origin - The value of the HTTP `Origin` request header, or `undefined`
  *                 when the header is absent (non-browser request).
@@ -95,6 +108,12 @@ export const isAllowedOrigin = (origin: string | undefined): boolean => {
   ) {
     return true;
   }
+
+  const configuredOrigins = (process.env.GITNEXUS_CORS_EXTRA_ORIGINS ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (configuredOrigins.includes(origin)) return true;
 
   // RFC 1918 private network ranges — allow any port on these hosts.
   // We parse the hostname out of the origin URL and check against each range.
@@ -639,6 +658,34 @@ export const resolveRegisteredRepoEntry = (
  * containment is done inline at the readFile sink with the canonical
  * path.relative idiom for CodeQL js/path-injection recognition.
  */
+async function listWikiFilesRecursive(rootDir: string, relDir = ''): Promise<string[]> {
+  const absDir = path.join(rootDir, relDir);
+  const entries = await fs.readdir(absDir, { withFileTypes: true });
+  const results: string[] = [];
+  for (const entry of entries) {
+    const relPath = relDir ? `${relDir}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      results.push(...(await listWikiFilesRecursive(rootDir, relPath)));
+    } else if (entry.isFile()) {
+      results.push(relPath);
+    }
+  }
+  return results;
+}
+
+function guessWikiContentType(filePath: string): string {
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'text/html; charset=utf-8';
+  if (lower.endsWith('.md')) return 'text/markdown; charset=utf-8';
+  if (lower.endsWith('.json')) return 'application/json; charset=utf-8';
+  if (lower.endsWith('.css')) return 'text/css; charset=utf-8';
+  if (lower.endsWith('.js')) return 'application/javascript; charset=utf-8';
+  if (lower.endsWith('.svg')) return 'image/svg+xml';
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  return 'application/octet-stream';
+}
+
 export const handleFileRequest = async (
   req: { query: any },
   res: {
@@ -1148,6 +1195,156 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
       }
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to delete repo' });
+    }
+  });
+
+  // ── Group management ─────────────────────────────────────────────────
+  // Cross-repo groups (group.yaml + Contract Registry) — same operations as
+  // the `gitnexus group *` CLI commands, exposed over HTTP so remote callers
+  // (e.g. the app-modernization web-api) can manage groups without shelling
+  // into the pod.
+
+  // List all configured groups
+  app.get('/api/groups', async (_req, res) => {
+    try {
+      const groups = await listGroups();
+      res.json({ groups });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to list groups' });
+    }
+  });
+
+  // Get one group's config (repos + manifest links)
+  app.get('/api/groups/:name', async (req, res) => {
+    try {
+      const name = assertString(req.params.name, 'name');
+      const result = await backend.getGroupService().groupList({ name });
+      if (result && typeof result === 'object' && 'error' in result) {
+        res.status(404).json({ error: (result as { error: string }).error });
+        return;
+      }
+      res.json(result);
+    } catch (err: any) {
+      res.status(err.status ?? 500).json({ error: err.message || 'Failed to get group' });
+    }
+  });
+
+  // Create a new group (writes a template group.yaml)
+  app.post('/api/groups', createRouteLimiter(), requireLocalhostOrigin, async (req, res) => {
+    try {
+      const name = assertString(req.body?.name, 'name');
+      const force = Boolean(req.body?.force);
+      const dir = await createGroupDir(getDefaultGitnexusDir(), name, force);
+      res.status(201).json({ name, dir });
+    } catch (err: any) {
+      const status = err instanceof BadRequestError ? err.status : /already exists/i.test(err.message ?? '') ? 409 : 400;
+      res.status(status).json({ error: err.message || 'Failed to create group' });
+    }
+  });
+
+  // Add a repo to a group. groupPath is the hierarchy path (e.g. hr/backend),
+  // registryName is the name the repo was indexed under (see /api/repos).
+  app.post(
+    '/api/groups/:name/repos',
+    createRouteLimiter(),
+    requireLocalhostOrigin,
+    async (req, res) => {
+      try {
+        const name = assertString(req.params.name, 'name');
+        const groupPath = assertString(req.body?.groupPath, 'groupPath');
+        const registryName = assertString(req.body?.registryName, 'registryName');
+        const groupDir = getGroupDir(getDefaultGitnexusDir(), name);
+        const config = await loadGroupConfig(groupDir);
+        config.repos[groupPath] = registryName;
+        await fs.writeFile(path.join(groupDir, 'group.yaml'), yaml.dump(config), 'utf-8');
+        res.status(201).json({ name, groupPath, registryName });
+      } catch (err: any) {
+        if (err instanceof GroupNotFoundError) {
+          res.status(404).json({ error: err.message });
+          return;
+        }
+        const status = err instanceof BadRequestError ? err.status : 400;
+        res.status(status).json({ error: err.message || 'Failed to add repo to group' });
+      }
+    },
+  );
+
+  // Remove a repo from a group. groupPath passed as a query param since it
+  // may contain slashes (e.g. ?groupPath=hr/backend).
+  app.delete(
+    '/api/groups/:name/repos',
+    createRouteLimiter(),
+    requireLocalhostOrigin,
+    async (req, res) => {
+      try {
+        const name = assertString(req.params.name, 'name');
+        const groupPath = assertString(req.query.groupPath, 'groupPath');
+        const groupDir = getGroupDir(getDefaultGitnexusDir(), name);
+        const config = await loadGroupConfig(groupDir);
+        if (!(groupPath in config.repos)) {
+          res.status(404).json({ error: `Repo path "${groupPath}" not found in group "${name}"` });
+          return;
+        }
+        delete config.repos[groupPath];
+        await fs.writeFile(path.join(groupDir, 'group.yaml'), yaml.dump(config), 'utf-8');
+        res.json({ removed: groupPath });
+      } catch (err: any) {
+        if (err instanceof GroupNotFoundError) {
+          res.status(404).json({ error: err.message });
+          return;
+        }
+        const status = err instanceof BadRequestError ? err.status : 400;
+        res.status(status).json({ error: err.message || 'Failed to remove repo from group' });
+      }
+    },
+  );
+
+  // Sync a group's Contract Registry (extract contracts + build cross-links).
+  // Mirrors `gitnexus group sync <name>` — may take a while for large groups.
+  app.post(
+    '/api/groups/:name/sync',
+    createRouteLimiter(),
+    requireLocalhostOrigin,
+    async (req, res) => {
+      try {
+        const name = assertString(req.params.name, 'name');
+        const groupDir = getGroupDir(getDefaultGitnexusDir(), name);
+        const config = await loadGroupConfig(groupDir);
+        const body = (req.body ?? {}) as Record<string, unknown>;
+        const result = await syncGroup(config, {
+          groupDir,
+          allowStale: Boolean(body.allowStale),
+          verbose: Boolean(body.verbose),
+          skipEmbeddings: Boolean(body.skipEmbeddings),
+          exactOnly: Boolean(body.exactOnly),
+        });
+        res.json({
+          contracts: result.contracts.length,
+          crossLinks: result.crossLinks.length,
+          unmatched: result.unmatched.length,
+        });
+      } catch (err: any) {
+        if (err instanceof GroupNotFoundError) {
+          res.status(404).json({ error: err.message });
+          return;
+        }
+        res.status(500).json({ error: err.message || 'Failed to sync group' });
+      }
+    },
+  );
+
+  // Check staleness of a group's member repos vs. the last sync.
+  app.get('/api/groups/:name/status', async (req, res) => {
+    try {
+      const name = assertString(req.params.name, 'name');
+      const result = await backend.getGroupService().groupStatus({ name });
+      if (result && typeof result === 'object' && 'error' in result) {
+        res.status(404).json({ error: (result as { error: string }).error });
+        return;
+      }
+      res.json(result);
+    } catch (err: any) {
+      res.status(err.status ?? 500).json({ error: err.message || 'Failed to get group status' });
     }
   });
 
@@ -1965,6 +2162,188 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
     }
     embedJobManager.cancelJob(jobId, 'Cancelled by user');
     res.json({ id: job.id, status: 'failed', error: 'Cancelled by user' });
+  });
+
+  // ── Wiki generation endpoints ──────────────────────────────────────
+  //
+  // LLM credentials/model are configured server-side only (GITNEXUS_WIKI_*
+  // env vars) — never accepted from the request body, so a caller can't
+  // redirect generation to an arbitrary LLM endpoint or exfiltrate the key.
+
+  const wikiJobManager = new WikiJobManager();
+
+  // POST /api/wiki — trigger server-side wiki generation for an indexed repo.
+  app.post(
+    '/api/wiki',
+    createRouteLimiter({ limit: 10 }),
+    requireLocalhostOrigin,
+    async (req, res) => {
+      try {
+        const entry = await resolveRepo(requestedRepo(req));
+        if (!entry || entry.__timedOut) {
+          res.status(404).json({ error: 'Repository not found' });
+          return;
+        }
+
+        const meta = await loadMeta(entry.storagePath);
+        if (!meta) {
+          res.status(400).json({ error: 'Repository is not indexed yet — run analyze first' });
+          return;
+        }
+
+        const apiKey = process.env.GITNEXUS_WIKI_API_KEY || '';
+        if (!apiKey) {
+          res.status(503).json({
+            error:
+              'Wiki generation is not configured on this server (missing GITNEXUS_WIKI_API_KEY)',
+          });
+          return;
+        }
+
+        const llmConfig = await resolveLLMConfig({
+          provider: (process.env.GITNEXUS_WIKI_PROVIDER as LLMProvider) || 'azure',
+          model: process.env.GITNEXUS_WIKI_MODEL,
+          baseUrl: process.env.GITNEXUS_WIKI_BASE_URL,
+          apiKey,
+          apiVersion: process.env.GITNEXUS_WIKI_API_VERSION || undefined,
+          isReasoningModel:
+            process.env.GITNEXUS_WIKI_REASONING_MODEL === undefined
+              ? true
+              : process.env.GITNEXUS_WIKI_REASONING_MODEL === 'true' ||
+                process.env.GITNEXUS_WIKI_REASONING_MODEL === '1',
+        });
+
+        if (!llmConfig.baseUrl || !llmConfig.model) {
+          res.status(503).json({
+            error: 'Wiki generation is not configured on this server (missing model/base URL)',
+          });
+          return;
+        }
+
+        const force = req.body?.force === true;
+        const lang = typeof req.body?.lang === 'string' ? req.body.lang : undefined;
+
+        let job;
+        try {
+          job = wikiJobManager.createJob(entry.name);
+        } catch (err: any) {
+          res.status(409).json({ error: err.message });
+          return;
+        }
+
+        if (job.status !== 'queued') {
+          // Existing active job for this repo — return it (dedup).
+          res.status(202).json({ jobId: job.id, status: job.status });
+          return;
+        }
+
+        wikiJobManager.updateJob(job.id, {
+          status: 'running',
+          progress: { phase: 'starting', percent: 0, message: 'Starting wiki generation...' },
+        });
+
+        const lbugPath = path.join(entry.storagePath, 'lbug');
+        const jobId = job.id;
+
+        (async () => {
+          try {
+            const generator = new WikiGenerator(
+              entry.path,
+              entry.storagePath,
+              lbugPath,
+              llmConfig,
+              { force, lang },
+              (phase, percent, detail) => {
+                wikiJobManager.updateJob(jobId, {
+                  progress: { phase, percent, message: detail || phase },
+                });
+              },
+            );
+            const result = await generator.run();
+            wikiJobManager.updateJob(jobId, {
+              status: 'complete',
+              result: {
+                pagesGenerated: result.pagesGenerated,
+                mode: result.mode,
+                failedModules: result.failedModules,
+              },
+            });
+          } catch (err: any) {
+            wikiJobManager.updateJob(jobId, {
+              status: 'failed',
+              error: err.message || 'Wiki generation failed',
+            });
+          }
+        })();
+
+        res.status(202).json({ jobId: job.id, status: job.status });
+      } catch (err: any) {
+        res
+          .status(statusFromError(err))
+          .json({ error: err.message || 'Failed to start wiki generation' });
+      }
+    },
+  );
+
+  // GET /api/wiki/files?repo=name — list generated wiki files (relative paths)
+  //
+  // NOTE: must be registered before the parameterized '/api/wiki/:jobId'
+  // route below, otherwise Express matches this path as jobId="files" and
+  // always returns 404 "Job not found" instead of listing the files.
+  app.get('/api/wiki/files', createRouteLimiter(), async (req, res) => {
+    try {
+      const entry = await resolveRepo(requestedRepo(req));
+      if (!entry || entry.__timedOut) {
+        res.status(404).json({ error: 'Repository not found' });
+        return;
+      }
+      const wikiDir = path.join(entry.storagePath, 'wiki');
+      const files = await listWikiFilesRecursive(wikiDir);
+      res.json({ files });
+    } catch {
+      res.status(404).json({ error: 'No wiki generated for this repository yet' });
+    }
+  });
+
+  // GET /api/wiki/file?repo=name&path=rel — stream a single generated wiki file
+  //
+  // NOTE: same ordering constraint as '/api/wiki/files' above — must come
+  // before '/api/wiki/:jobId'.
+  app.get('/api/wiki/file', createRouteLimiter(), async (req, res) => {
+    try {
+      const entry = await resolveRepo(requestedRepo(req));
+      if (!entry || entry.__timedOut) {
+        res.status(404).json({ error: 'Repository not found' });
+        return;
+      }
+      const wikiDir = path.resolve(path.join(entry.storagePath, 'wiki'));
+      const rel = assertString(req.query.path, 'path');
+      const fullPath = path.resolve(wikiDir, rel);
+      const fullRel = path.relative(wikiDir, fullPath);
+      if (fullRel.startsWith('..') || path.isAbsolute(fullRel)) {
+        res.status(403).json({ error: 'Path traversal denied' });
+        return;
+      }
+      const data = await fs.readFile(fullPath);
+      res.setHeader('Content-Type', guessWikiContentType(fullPath));
+      res.send(data);
+    } catch (err: any) {
+      if (err.code === 'ENOENT') {
+        res.status(404).json({ error: 'File not found' });
+      } else {
+        res.status(statusFromError(err)).json({ error: err.message || 'Failed to read file' });
+      }
+    }
+  });
+
+  // GET /api/wiki/:jobId — poll wiki generation job status
+  app.get('/api/wiki/:jobId', (req, res) => {
+    const job = wikiJobManager.getJob(req.params.jobId);
+    if (!job) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    res.json(job);
   });
 
   // ── Web UI (served at root) ───────────────────────────────────────

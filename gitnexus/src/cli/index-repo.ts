@@ -19,6 +19,7 @@ import {
   getStoragePaths,
   INDEX_METADATA_FILE,
   loadMeta,
+  saveMeta,
   ensureGitNexusIgnored,
   registerRepo,
 } from '../storage/repo-manager.js';
@@ -109,6 +110,7 @@ export const indexCommand = async (inputPathParts?: string[], options?: IndexOpt
 
   // ── Load or reconstruct meta ──────────────────────────────────────
   let meta = await loadMeta(storagePath);
+  let shouldPersistMeta = false;
 
   if (!meta) {
     if (!options?.force) {
@@ -125,6 +127,7 @@ export const indexCommand = async (inputPathParts?: string[], options?: IndexOpt
       lastCommit: '',
       indexedAt: new Date().toISOString(),
     };
+    shouldPersistMeta = true;
   }
 
   // ── Register in global registry ───────────────────────────────────
@@ -134,6 +137,14 @@ export const indexCommand = async (inputPathParts?: string[], options?: IndexOpt
   // full re-analyze.
   if (!meta.remoteUrl && isGitRepo(repoPath)) {
     meta.remoteUrl = getRemoteUrl(repoPath);
+    if (meta.remoteUrl) shouldPersistMeta = true;
+  }
+
+  // Keep registry and on-disk metadata coherent: validate paths (server/MCP init)
+  // prune entries with no metadata file, so --force must materialize a minimal
+  // gitnexus.json/meta.json pair to survive restarts.
+  if (shouldPersistMeta) {
+    await saveMeta(storagePath, meta);
   }
   await registerRepo(repoPath, meta);
   await ensureGitNexusIgnored(repoPath);
