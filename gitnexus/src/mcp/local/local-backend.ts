@@ -462,6 +462,27 @@ interface RepoHandle {
   branches?: BranchSummary[];
 }
 
+const READ_REPO_FILE_DEFAULT_LINES = 200;
+const READ_REPO_FILE_MAX_LINES = 1000;
+const READ_REPO_FILE_MAX_BYTES = 256 * 1024;
+
+function isPathInside(parent: string, child: string): boolean {
+  const rel = path.relative(parent, child);
+  return rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+}
+
+function normalizeRepoRelativeFilePath(input: unknown): string | null {
+  if (typeof input !== 'string') return null;
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  const normalized = trimmed.replace(/\\/g, '/');
+  if (normalized.startsWith('/')) return null;
+  const segments = normalized.split('/');
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..')) return null;
+  if (segments.includes('.git') || segments.includes('.gitnexus')) return null;
+  return normalized;
+}
+
 /** Resolve symlinks for path comparison; falls back to path.resolve on error.
  * Uses `realpathSync.native` (not the pure-JS `realpathSync`) so that Windows
  * 8.3 short names (e.g. RUNNER~1 → runneradmin) are expanded to long form,
@@ -1780,6 +1801,8 @@ export class LocalBackend {
       }
       case 'context':
         return this.context(repo, p);
+      case 'read_repo_file':
+        return this.readRepoFile(repo, p);
       case 'explain':
         return this.explain(repo, p);
       case 'pdg_query':
@@ -3390,6 +3413,100 @@ export class LocalBackend {
         step_index: r.step || r[2],
         step_count: r.stepCount || r[3],
       })),
+    };
+  }
+
+  private async readRepoFile(
+    repo: RepoHandle,
+    params: {
+      path?: string;
+      start_line?: number;
+      end_line?: number;
+    },
+  ): Promise<any> {
+    const requestedPath = normalizeRepoRelativeFilePath(params.path);
+    if (!requestedPath) {
+      return {
+        error:
+          'Invalid "path": expected a non-empty repository-relative path without traversal and outside .git/.gitnexus.',
+      };
+    }
+
+    const startLine = Number.isInteger(params.start_line) ? Number(params.start_line) : 1;
+    if (startLine < 1) {
+      return { error: `Invalid "start_line": expected an integer >= 1, got ${JSON.stringify(params.start_line)}.` };
+    }
+
+    const requestedEnd = params.end_line;
+    if (requestedEnd !== undefined && (!Number.isInteger(requestedEnd) || Number(requestedEnd) < startLine)) {
+      return {
+        error: `Invalid "end_line": expected an integer >= start_line (${startLine}), got ${JSON.stringify(requestedEnd)}.`,
+      };
+    }
+
+    const maxEndLine = startLine + READ_REPO_FILE_MAX_LINES - 1;
+    const endLine = Math.min(
+      requestedEnd === undefined ? startLine + READ_REPO_FILE_DEFAULT_LINES - 1 : Number(requestedEnd),
+      maxEndLine,
+    );
+
+    const repoRoot = tryRealpath(repo.repoPath);
+    const absolutePath = path.resolve(repoRoot, requestedPath);
+
+    let resolvedPath: string;
+    try {
+      resolvedPath = tryRealpath(absolutePath);
+    } catch {
+      resolvedPath = absolutePath;
+    }
+
+    if (!isPathInside(repoRoot, resolvedPath)) {
+      return { error: 'Requested path resolves outside the indexed repository root.' };
+    }
+
+    let stat;
+    try {
+      stat = await fs.stat(resolvedPath);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { error: `Unable to stat file '${requestedPath}': ${message}` };
+    }
+
+    if (!stat.isFile()) {
+      return { error: `Requested path '${requestedPath}' is not a regular file.` };
+    }
+
+    if (stat.size > READ_REPO_FILE_MAX_BYTES) {
+      return {
+        error: `File '${requestedPath}' is too large (${stat.size} bytes). Max supported size is ${READ_REPO_FILE_MAX_BYTES} bytes.`,
+      };
+    }
+
+    let content: string;
+    try {
+      const raw = await fs.readFile(resolvedPath);
+      if (raw.includes(0)) {
+        return { error: `File '${requestedPath}' appears to be binary and cannot be returned as text.` };
+      }
+      content = raw.toString('utf8');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { error: `Unable to read file '${requestedPath}': ${message}` };
+    }
+
+    const lines = content.split(/\r?\n/);
+    const selected = lines.slice(startLine - 1, endLine);
+    const effectiveEndLine = startLine + Math.max(selected.length - 1, 0);
+
+    return {
+      repo: repo.name,
+      path: requestedPath,
+      filePath: resolvedPath,
+      startLine,
+      endLine: effectiveEndLine,
+      totalLines: lines.length,
+      truncated: effectiveEndLine < lines.length,
+      content: selected.join('\n'),
     };
   }
 

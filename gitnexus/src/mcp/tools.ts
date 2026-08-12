@@ -333,6 +333,47 @@ SERVICE: optional monorepo path prefix (case-sensitive path segments). When "rep
     },
   },
   {
+    name: 'read_repo_file',
+    description: `Read a text file directly from the indexed repository worktree.
+
+WHEN TO USE: You need the raw contents of a specific file path, not just symbol snippets. This complements query()/context(), which return code at symbol granularity.
+AFTER THIS: Use context() or query() to connect the file's contents back to symbols and execution flows.
+
+SAFETY / LIMITS:
+- Reads only files inside the indexed repository root.
+- Rejects path traversal and internal Git metadata paths (for example .git/ and .gitnexus/).
+- Intended for text files only; binary files are rejected.
+- Line range is bounded to keep MCP responses small.
+`,
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Repository-relative POSIX-style file path to read (for example: src/app.ts or README.md).',
+          minLength: 1,
+        },
+        start_line: {
+          type: 'integer',
+          description: '1-based first line to return (default: 1).',
+          default: 1,
+          minimum: 1,
+        },
+        end_line: {
+          type: 'integer',
+          description: '1-based last line to return, inclusive. Defaults to a bounded window from start_line.',
+          minimum: 1,
+        },
+        repo: {
+          type: 'string',
+          description: 'Repository name or path. Omit if only one repo is indexed.',
+        },
+      },
+      required: ['path'],
+    },
+  },
+  {
     name: 'detect_changes',
     description: `Analyze uncommitted git changes and find affected execution flows.
 Maps git diff hunks to indexed symbols, then traces which processes are impacted.
