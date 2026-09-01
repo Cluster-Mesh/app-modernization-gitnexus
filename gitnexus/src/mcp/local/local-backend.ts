@@ -74,6 +74,11 @@ import {
 import { checkStalenessAsync, checkCwdMatch } from '../../core/git-staleness.js';
 import { logger } from '../../core/logger.js';
 import {
+  readSbomFromStorage,
+  SBOM_FORMATS,
+  type SbomFormat,
+} from '../../core/sbom.js';
+import {
   isLocalEmbeddingRuntimeBlockerMessage,
   isMissingLocalEmbeddingStackMessage,
 } from '../../core/embeddings/runtime-support.js';
@@ -117,6 +122,7 @@ import {
 const SOURCE_FILE_EXTENSIONS: readonly string[] = EXTENSIONS.filter(
   (e) => e.startsWith('.') && !e.includes('/'),
 );
+const MAX_MCP_SBOM_BYTES = 2 * 1024 * 1024;
 /** A target is path-ish if it has a path separator or ends in a known source
  *  extension. A bare dotted symbol (`UserController.create`) is NOT path-ish. */
 function looksLikeFilePath(target: string): boolean {
@@ -1793,6 +1799,71 @@ export class LocalBackend {
     );
 
     switch (method) {
+      case 'get_sbom': {
+        const formatValue = p.format ?? 'cyclonedx-json';
+        if (
+          typeof formatValue !== 'string' ||
+          !(SBOM_FORMATS as readonly string[]).includes(formatValue)
+        ) {
+          throw new Error(`format must be one of: ${SBOM_FORMATS.join(', ')}`);
+        }
+        const format = formatValue as SbomFormat;
+        const includeContent = p.include_content ?? true;
+        if (typeof includeContent !== 'boolean') {
+          throw new Error('include_content must be a boolean.');
+        }
+
+        const result = await readSbomFromStorage(path.dirname(repo.lbugPath), {
+          format,
+          includeContent,
+        });
+        if (!result) {
+          return {
+            status: 'missing',
+            format,
+            includeContent,
+            contentAvailable: false,
+          };
+        }
+        if (result.receipt.status !== 'ready' || !includeContent) {
+          return {
+            ...result,
+            format,
+            includeContent,
+            contentAvailable: false,
+          };
+        }
+
+        const document = result.documents?.[format];
+        if (!document) {
+          return {
+            ...result,
+            format,
+            includeContent,
+            contentAvailable: false,
+          };
+        }
+        if (document.bytes > MAX_MCP_SBOM_BYTES) {
+          return {
+            receipt: result.receipt,
+            status: result.receipt.status,
+            format,
+            includeContent,
+            contentAvailable: false,
+            contentBytes: document.bytes,
+            message:
+              `SBOM content is ${document.bytes} bytes, above the MCP limit of ` +
+              `${MAX_MCP_SBOM_BYTES} bytes. Use the HTTP or TypeScript API for the full document.`,
+          };
+        }
+        return {
+          ...result,
+          format,
+          includeContent,
+          contentAvailable: true,
+          contentBytes: document.bytes,
+        };
+      }
       case 'query':
         return this.query(repo, p);
       case 'cypher': {

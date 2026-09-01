@@ -163,6 +163,46 @@ GitNexus builds a complete knowledge graph of your codebase through a multi-phas
 
 The result is a **LadybugDB graph database** stored locally in `.gitnexus/` with full-text search and semantic embeddings.
 
+### Software bill of materials (SBOM)
+
+Normal `analyze` runs also generate a local SBOM with [Syft](https://github.com/anchore/syft).
+Syft is the only provider currently bundled; GitNexus does not run a vulnerability scanner.
+CycloneDX JSON and SPDX JSON are generated together, and the latest result is stored per
+branch under `.gitnexus/branches/<slug>/sbom/` (or `.gitnexus/sbom/` for the workspace index).
+The receipt records the indexed commit, checksums, timings, and any degraded status.
+
+Syft must be available on `PATH`, or can be selected explicitly:
+
+```bash
+gitnexus analyze --syft-path /opt/syft --sbom-timeout 300000
+GITNEXUS_SYFT_PATH=/opt/syft gitnexus analyze
+gitnexus analyze --no-sbom
+```
+
+The same settings can be placed in `.gitnexusrc`:
+
+```json
+{
+  "sbom": true,
+  "sbomTimeout": 120000,
+  "syftPath": "/opt/syft"
+}
+```
+
+SBOM generation is non-fatal: a missing executable, failed process, timeout,
+cancelled run, invalid output, or persistence error is reported as a degraded
+analysis result while the graph index remains usable. A matching receipt for
+the current commit is reused; `--repair-fts` does not generate or refresh an SBOM.
+
+The HTTP server exposes the latest document at
+`GET /api/repo/sbom?repo=<name>&format=cyclonedx-json|spdx-json`. Content is included
+by default; use `includeContent=false` for receipt metadata. The typed service
+(`readSbom(repoPath, { branch, format, includeContent })`) is also available to
+local TypeScript callers, so scanners can consume the document without HTTP or MCP.
+The MCP `get_sbom` tool uses the same contract and defaults to CycloneDX content;
+`gitnexus://repo/{name}/sbom` provides a bounded summary. MCP responses larger
+than 2 MiB point callers to the HTTP or TypeScript API rather than truncating data.
+
 ### Experimental community detection engine
 
 Community detection uses the bundled Graphology Leiden implementation by default. To test the #2337 Icebug migration path without changing default analyze behavior, set:
@@ -175,7 +215,7 @@ Supported values are `graphology`, `icebug`, and `auto`. The Icebug path is an e
 
 ## MCP Tools
 
-Your AI agent gets **17 tools** (15 per-repo + 2 group) automatically:
+Your AI agent gets **19 tools** (17 per-repo + 2 group) automatically:
 
 | Tool             | What It Does                                                           |
 | ---------------- | ---------------------------------------------------------------------- |
@@ -194,6 +234,7 @@ Your AI agent gets **17 tools** (15 per-repo + 2 group) automatically:
 | `api_impact`     | Pre-change impact report for an API route handler                      |
 | `explain`        | Explain persisted taint findings (source→sink flows, `--pdg` indexes)  |
 | `pdg_query`      | Query control/data dependence at statement level (`--pdg` indexes)     |
+| `get_sbom`       | Read the latest Syft SBOM in CycloneDX or SPDX JSON format         |
 | `group_list`     | List configured repository groups                                      |
 | `group_sync`     | Rebuild a group's Contract Registry and cross-repo links               |
 
@@ -211,6 +252,7 @@ Your AI agent gets **17 tools** (15 per-repo + 2 group) automatically:
 | `gitnexus://repo/{name}/processes`      | All execution flows                                  |
 | `gitnexus://repo/{name}/process/{name}` | Full process trace with steps                        |
 | `gitnexus://repo/{name}/schema`         | Graph schema for Cypher queries                      |
+| `gitnexus://repo/{name}/sbom`            | Latest SBOM receipt and generation status             |
 | `gitnexus://group/{name}/contracts`     | A group's extracted contracts and cross-links        |
 | `gitnexus://group/{name}/status`        | Staleness of repos in a group                        |
 
@@ -240,6 +282,9 @@ gitnexus analyze --verbose       # Log skipped files when parsers are unavailabl
 gitnexus analyze --max-file-size 1024  # Skip files larger than N KB (default: 512, cap: 32768)
 gitnexus analyze --worker-timeout 60  # Increase worker idle timeout for slow parses
 gitnexus analyze --wal-checkpoint-threshold 67108864  # 64 MiB. Control LadybugDB WAL auto-checkpoint threshold (default: 67108864 = 64 MiB; -1 keeps Ladybug stock ~16 MiB)
+gitnexus analyze --no-sbom        # Skip SBOM generation for this run
+gitnexus analyze --sbom-timeout 300000  # Syft wall-clock budget in milliseconds
+gitnexus analyze --syft-path /opt/syft  # Use a specific Syft executable
 gitnexus mcp                     # Start MCP server (stdio) — serves all indexed repos
 gitnexus serve                   # Start local HTTP server (multi-repo) for web UI
 gitnexus index                   # Register an existing .gitnexus/ folder into the global registry

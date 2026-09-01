@@ -141,6 +141,7 @@ import {
   finalizeAnalyzerRunnerIdentity,
   resolveAnalyzerRunnerIdentity,
 } from './analyzer-identity.js';
+import { ensureSbom, type SbomResult } from './sbom.js';
 
 const ANALYSIS_FEATURES = [
   CLASS_FRAMEWORK_ANNOTATIONS_FEATURE,
@@ -207,6 +208,12 @@ export interface AnalyzeOptions {
   repairFts?: boolean;
   /** Emit per-index FTS create logs. */
   verbose?: boolean;
+  /** Generate a Syft SBOM after graph publication (enabled by default). */
+  sbom?: boolean;
+  /** Maximum time allowed for the Syft subprocess. */
+  sbomTimeout?: number;
+  /** Syft executable path or command name override. */
+  syftPath?: string;
   embeddings?: boolean;
   /**
    * Override the auto-skip node-count cap for embedding generation.
@@ -351,6 +358,8 @@ export interface AnalyzeResult {
   pipelineResult?: any;
   /** True when analyze only repaired FTS indexes and skipped pipeline re-analysis. */
   ftsRepairedOnly?: boolean;
+  /** SBOM generation status and receipt for this analysis run. */
+  sbom?: SbomResult;
   /**
    * True when the FTS extension was unavailable so search-index creation was
    * skipped (offline-first degradation). The graph is fully queryable; only
@@ -1134,6 +1143,15 @@ export async function runFullAnalysis(
           }
         }
         await ensureGitNexusIgnored(repoPath);
+        const sbom = await ensureSbom({
+          repoPath,
+          storageDir: metaDir,
+          indexedCommit: currentCommit,
+          branch: branchLabel ?? undefined,
+          enabled: options.sbom !== false,
+          syftPath: options.syftPath,
+          timeoutMs: options.sbomTimeout,
+        });
         return {
           // `resolveRepoIdentityRoot` collapses worktree roots to the
           // canonical repo basename (#1259) but leaves arbitrary subdirs
@@ -1145,6 +1163,7 @@ export async function runFullAnalysis(
           repoPath,
           stats: existingMeta.stats ?? {},
           alreadyUpToDate: true,
+          sbom,
           isPrimaryBranch: !placement.branch,
         };
       }
@@ -2565,6 +2584,16 @@ export async function runFullAnalysis(
     // live and the next run recovers via the full-rebuild path.
     await saveMeta(metaDir, meta);
 
+    const sbom = await ensureSbom({
+      repoPath,
+      storageDir: metaDir,
+      indexedCommit: currentCommit,
+      branch: branchLabel ?? undefined,
+      enabled: options.sbom !== false,
+      syftPath: options.syftPath,
+      timeoutMs: options.sbomTimeout,
+    });
+
     progress('done', 100, 'Done');
 
     return {
@@ -2573,6 +2602,7 @@ export async function runFullAnalysis(
       stats: meta.stats,
       pipelineResult,
       ftsSkipped: !ftsReady,
+      sbom,
       isPrimaryBranch: !placement.branch,
     };
   } catch (err) {

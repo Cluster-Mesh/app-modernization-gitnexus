@@ -32,6 +32,9 @@
  * fields, JSON-safe by construction.
  */
 import type { AnalyzeResult } from '../core/run-analyze.js';
+import type { SbomResult } from '../core/sbom.js';
+
+export type SbomResultIpc = Pick<SbomResult, 'receipt'>;
 
 /**
  * The JSON-safe subset of `AnalyzeResult` that crosses the analyze-worker IPC
@@ -52,7 +55,9 @@ import type { AnalyzeResult } from '../core/run-analyze.js';
 export type AnalyzeResultIpc = Pick<
   AnalyzeResult,
   'repoName' | 'repoPath' | 'stats' | 'alreadyUpToDate' | 'ftsRepairedOnly' | 'ftsSkipped'
->;
+> & {
+  sbom?: SbomResultIpc;
+};
 
 /**
  * Project an `AnalyzeResult` down to the JSON-safe fields the parent consumes,
@@ -68,5 +73,6 @@ export function projectAnalyzeResultForIpc(result: AnalyzeResult): AnalyzeResult
     alreadyUpToDate: result.alreadyUpToDate,
     ftsRepairedOnly: result.ftsRepairedOnly,
     ftsSkipped: result.ftsSkipped,
+    ...(result.sbom ? { sbom: { receipt: result.sbom.receipt } } : {}),
   };
 }

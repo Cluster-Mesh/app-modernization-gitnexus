@@ -692,6 +692,12 @@ export interface AnalyzeOptions {
   maxFileSize?: string;
   /** Override worker sub-batch idle timeout in seconds. */
   workerTimeout?: string;
+  /** Generate a Syft SBOM unless explicitly disabled with --no-sbom. */
+  sbom?: boolean;
+  /** Maximum Syft execution time in milliseconds. */
+  sbomTimeout?: string;
+  /** Syft executable path or command name. */
+  syftPath?: string;
   /** Control LadybugDB WAL auto-checkpoint threshold during analyze. */
   walCheckpointThreshold?: string;
   /** Parse worker pool size (>=1); 0 is rejected (no sequential mode). */
@@ -922,6 +928,17 @@ const analyzeCommandImpl = async (
     process.env.GITNEXUS_WORKER_SUB_BATCH_TIMEOUT_MS = String(
       Math.round(workerTimeoutSeconds * 1000),
     );
+  }
+
+  let sbomTimeout: number | undefined;
+  if (options.sbomTimeout !== undefined) {
+    const parsed = Number(options.sbomTimeout);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 30 * 60 * 1000) {
+      cliError('  --sbom-timeout must be an integer between 1 and 1800000 milliseconds.\n');
+      process.exitCode = 1;
+      return;
+    }
+    sbomTimeout = parsed;
   }
 
   if (options.walCheckpointThreshold !== undefined) {
@@ -1378,6 +1395,9 @@ const analyzeCommandImpl = async (
       // Extra fetch-wrapper names from `.gitnexusrc` (#1589/#1852 residual);
       // forwarded to the routes phase consumer scan.
       fetchWrappers: options.fetchWrappers,
+      sbom: options.sbom !== false,
+      sbomTimeout,
+      syftPath: options.syftPath,
       // The CLI always process.exit()s after this returns (success path at the
       // end of analyzeCommandImpl, error/interrupt paths via process.exit too),
       // so the finalize close skips the native conn/db close — it can double-free

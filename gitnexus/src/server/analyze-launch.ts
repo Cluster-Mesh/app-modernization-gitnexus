@@ -46,6 +46,9 @@ export interface LaunchOptions {
   embeddings?: boolean;
   dropEmbeddings?: boolean;
   registryName?: string;
+  sbom?: boolean;
+  sbomTimeout?: number;
+  syftPath?: string;
 }
 
 const MAX_WORKER_RETRIES = 2;
@@ -159,6 +162,7 @@ export function createLaunchAnalysisWorker(deps: LaunchDeps) {
         execArgv: [...tsxHookArgs, '--max-old-space-size=8192'],
         stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       });
+      let terminalMessageReceived = false;
 
       // Capture stderr for crash diagnostics
       let stderrChunks = '';
@@ -181,6 +185,7 @@ export function createLaunchAnalysisWorker(deps: LaunchDeps) {
             progress: { phase: msg.phase, percent: msg.percent, message: msg.message },
           });
         } else if (msg.type === 'complete') {
+          terminalMessageReceived = true;
           releaseRepoLock(analyzeLockKey);
           // Before marking complete: (1) wait for the worker's on-disk
           // finalization to settle (see waitForSettledIndex), (2) evict the
@@ -194,7 +199,11 @@ export function createLaunchAnalysisWorker(deps: LaunchDeps) {
             .catch(() => {}) // best-effort: eviction failure must not fail the job
             .then(() => backend.init())
             .then(() => {
-              jobManager.updateJob(job.id, { status: 'complete', repoName: msg.result.repoName });
+              jobManager.updateJob(job.id, {
+                status: 'complete',
+                repoName: msg.result.repoName,
+                sbom: msg.result.sbom,
+              });
             })
             .catch((err) => {
               logger.error({ err }, 'backend.init() failed after analyze:');
@@ -204,8 +213,9 @@ export function createLaunchAnalysisWorker(deps: LaunchDeps) {
               });
             });
         } else if (msg.type === 'error') {
-          releaseRepoLock(analyzeLockKey);
-          // A failed (force) analyze may still have rewritten DB files first.
+            terminalMessageReceived = true;
+            releaseRepoLock(analyzeLockKey);
+            // A failed (force) analyze may still have rewritten DB files first.
           void closeDbHandle().catch(() => {});
           jobManager.updateJob(job.id, { status: 'failed', error: msg.message });
         }
@@ -222,6 +232,7 @@ export function createLaunchAnalysisWorker(deps: LaunchDeps) {
       child.on('exit', (code) => {
         const j = jobManager.getJob(job.id);
         if (!j || j.status === 'complete' || j.status === 'failed') return;
+        if (terminalMessageReceived) return;
 
         // Worker crashed — attempt retry if under the limit
         if (j.retryCount < MAX_WORKER_RETRIES) {
@@ -264,6 +275,9 @@ export function createLaunchAnalysisWorker(deps: LaunchDeps) {
           embeddings: !!opts.embeddings,
           dropEmbeddings: !!opts.dropEmbeddings,
           ...(opts.registryName ? { registryName: opts.registryName } : {}),
+          ...(opts.sbom !== undefined ? { sbom: opts.sbom } : {}),
+          ...(opts.sbomTimeout !== undefined ? { sbomTimeout: opts.sbomTimeout } : {}),
+          ...(opts.syftPath ? { syftPath: opts.syftPath } : {}),
         },
       });
     };
