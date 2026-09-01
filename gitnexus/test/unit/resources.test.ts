@@ -54,6 +54,13 @@ function createMockBackend(overrides: Partial<Record<string, any>> = {}): any {
     readGroupStatusResource: vi
       .fn()
       .mockResolvedValue(overrides.groupStatusBody ?? 'group: mock\n'),
+    callTool: vi.fn().mockResolvedValue({
+      receipt: { status: 'missing' },
+      status: 'missing',
+      format: 'cyclonedx-json',
+      includeContent: false,
+      contentAvailable: false,
+    }),
     ...overrides,
   };
 }
@@ -91,18 +98,19 @@ describe('getResourceDefinitions', () => {
 });
 
 describe('getResourceTemplates', () => {
-  it('returns 8 dynamic templates', () => {
+  it('returns 9 dynamic templates', () => {
     const templates = getResourceTemplates();
-    expect(templates).toHaveLength(8);
+    expect(templates).toHaveLength(9);
   });
 
-  it('includes context, clusters, processes, schema, cluster detail, process detail, group contracts/status', () => {
+  it('includes context, clusters, processes, schema, sbom, cluster detail, process detail, group contracts/status', () => {
     const templates = getResourceTemplates();
     const uris = templates.map((t) => t.uriTemplate);
     expect(uris).toContain('gitnexus://repo/{name}/context');
     expect(uris).toContain('gitnexus://repo/{name}/clusters');
     expect(uris).toContain('gitnexus://repo/{name}/processes');
     expect(uris).toContain('gitnexus://repo/{name}/schema');
+    expect(uris).toContain('gitnexus://repo/{name}/sbom');
     expect(uris).toContain('gitnexus://repo/{name}/cluster/{clusterName}');
     expect(uris).toContain('gitnexus://repo/{name}/process/{processName}');
     expect(uris).toContain('gitnexus://group/{name}/contracts');
@@ -144,6 +152,14 @@ describe('parseResourceUri', () => {
     });
   });
 
+  it('parses the repository SBOM resource', () => {
+    expect(parseResourceUri('gitnexus://repo/example/sbom')).toEqual({
+      kind: 'repo',
+      repoName: 'example',
+      resourceType: 'sbom',
+    });
+  });
+
   it('coerces unmatchedOnly false from string', () => {
     const p = parseResourceUri('gitnexus://group/g1/contracts?unmatchedOnly=false');
     expect(p.kind).toBe('group');
@@ -177,6 +193,20 @@ describe('parseResourceUri', () => {
 // ─── readResource URI parsing ────────────────────────────────────────
 
 describe('readResource', () => {
+  it('returns the bounded SBOM summary through the backend tool', async () => {
+    const backend = createMockBackend();
+    const result = await readResource('gitnexus://repo/example/sbom', backend);
+
+    expect(JSON.parse(result)).toMatchObject({
+      status: 'missing',
+      includeContent: false,
+    });
+    expect(backend.callTool).toHaveBeenCalledWith('get_sbom', {
+      repo: 'example',
+      include_content: false,
+    });
+  });
+
   it('routes gitnexus://repos to listRepos', async () => {
     const backend = createMockBackend({
       repos: [

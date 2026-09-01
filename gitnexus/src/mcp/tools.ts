@@ -119,6 +119,41 @@ on other tools (query, context, impact, etc.) to target the correct one.`,
     },
   },
   {
+    name: 'get_sbom',
+    description: `Read the latest Syft software bill of materials for an indexed repository.
+
+Returns the raw CycloneDX JSON document by default. Set "format" to "spdx-json" for SPDX JSON, or set "include_content" to false for a bounded receipt/status summary. SBOM generation is performed during analyze and failures are reported as degraded status; this tool does not run a vulnerability scanner.
+
+WHEN TO USE: Supplying an SBOM to a vulnerability scanner or inspecting dependency inventory.
+AFTER THIS: Use the returned document content directly, or call the HTTP/programmatic SBOM API when the MCP content is larger than the agent response budget.`,
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: {
+          type: 'string',
+          description: 'Repository name or path (optional when only one repository is indexed).',
+        },
+        branch: {
+          type: 'string',
+          description: 'Indexed branch selector (optional; defaults to the workspace index).',
+        },
+        format: {
+          type: 'string',
+          description: 'SBOM format (default: cyclonedx-json).',
+          enum: ['cyclonedx-json', 'spdx-json'],
+          default: 'cyclonedx-json',
+        },
+        include_content: {
+          type: 'boolean',
+          description: 'Include the raw JSON document (default: true).',
+          default: true,
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: 'query',
     description: `Query the code knowledge graph for execution flows related to a concept.
 Returns processes (call chains) ranked by relevance, each with its symbols and file locations.
@@ -368,6 +403,10 @@ SAFETY / LIMITS:
         repo: {
           type: 'string',
           description: 'Repository name or path. Omit if only one repo is indexed.',
+        },
+        branch: {
+          type: 'string',
+          description: 'Indexed branch selector (optional; defaults to the workspace index).',
         },
       },
       required: ['path'],

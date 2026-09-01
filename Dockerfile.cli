@@ -4,6 +4,12 @@ ARG TARGETPLATFORM
 # image. Bumping requires a coordinated update in Dockerfile.web and
 # gitnexus/Dockerfile.test so all images bootstrap the same npm.
 ARG NPM_VERSION=11.14.1
+# Syft is installed from a release tarball in the runtime image. Keep both the
+# version and architecture-specific digests pinned so the CLI image remains
+# reproducible and does not depend on a mutable "latest" asset.
+ARG SYFT_VERSION=1.51.1
+ARG SYFT_AMD64_SHA256=8fcb33017a0dc1058298c923c436d19dfa68ae93968e0b423248542e3afb9fc3
+ARG SYFT_ARM64_SHA256=a7fd2b784e6664acd44719270574f6cd8c6864fc2b1700bf9099bd1cccda7d7f
 
 # -- Builder -----------------------------------------------------------
 # Native modules (tree-sitter-*, onnxruntime-node, node-gyp builds for
@@ -16,8 +22,15 @@ WORKDIR /app
 
 RUN npx --yes npm@${NPM_VERSION} install -g npm@${NPM_VERSION}
 
-# Toolchain for node-gyp / native builds.
-RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ git && rm -rf /var/lib/apt/lists/*
+# Toolchain for node-gyp / native builds. Bootstrap CA certificates from the
+# base image's HTTP sources, then use HTTPS for the remaining APT operations so
+# builds also work behind networks that block or proxy plain HTTP.
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends ca-certificates \
+    && sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends python3 make g++ git \
+    && rm -rf /var/lib/apt/lists/*
 
 # Build gitnexus-shared first - gitnexus depends on it as a workspace.
 COPY gitnexus-shared/package.json gitnexus-shared/package-lock.json ./gitnexus-shared/
@@ -50,12 +63,40 @@ RUN npm run postinstall --prefix gitnexus
 # -- Runtime -----------------------------------------------------------
 # node:22-bookworm-slim
 FROM node:22-bookworm-slim@sha256:9f6d5975c7dca860947d3915877f85607946403fc55349f39b4bc3688448bb6e AS runtime
+ARG TARGETARCH
+ARG SYFT_VERSION
+ARG SYFT_AMD64_SHA256
+ARG SYFT_ARM64_SHA256
 
 # curl for the healthcheck; git for cloning; ca-certificates for TLS verification.
-RUN apt-get update && apt-get install -y --no-install-recommends curl git ca-certificates && rm -rf /var/lib/apt/lists/* \
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends ca-certificates \
+    && sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends curl git \
+    && rm -rf /var/lib/apt/lists/* \
     && rm -rf /usr/local/lib/node_modules/npm \
     && rm -rf /usr/local/lib/node_modules/corepack \
     && rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
+
+# Syft is required only when an analysis generates an SBOM. Install a pinned
+# release for the supported Docker targets and retain syftPath/GITNEXUS_SYFT_PATH
+# as an override for local, air-gapped, or enterprise installations.
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) syft_sha256="$SYFT_AMD64_SHA256" ;; \
+      arm64) syft_sha256="$SYFT_ARM64_SHA256" ;; \
+      *) echo "Unsupported TARGETARCH for the bundled Syft binary: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    syft_archive="syft_${SYFT_VERSION}_linux_${TARGETARCH}.tar.gz"; \
+    curl --fail --silent --show-error --location \
+      "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/${syft_archive}" \
+      --output "/tmp/${syft_archive}"; \
+    echo "${syft_sha256}  /tmp/${syft_archive}" | sha256sum --check --status -; \
+    tar --extract --gzip --file "/tmp/${syft_archive}" --directory /usr/local/bin syft; \
+    chmod 0755 /usr/local/bin/syft; \
+    rm -f "/tmp/${syft_archive}"; \
+    syft version
 
 WORKDIR /app
 

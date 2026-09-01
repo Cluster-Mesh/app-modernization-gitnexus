@@ -95,6 +95,9 @@ const KEY_SPECS: Record<string, KeySpec> = {
   allowDuplicateName: { target: 'allowDuplicateName', kind: 'boolean' },
   maxFileSize: { target: 'maxFileSize', kind: 'numeric-string' },
   workerTimeout: { target: 'workerTimeout', kind: 'numeric-string' },
+  sbom: { target: 'sbom', kind: 'boolean' },
+  sbomTimeout: { target: 'sbomTimeout', kind: 'numeric-string' },
+  syftPath: { target: 'syftPath', kind: 'string' },
   walCheckpointThreshold: { target: 'walCheckpointThreshold', kind: 'numeric-string' },
   workers: { target: 'workers', kind: 'numeric-string' },
   embeddingThreads: { target: 'embeddingThreads', kind: 'numeric-string' },
@@ -438,7 +441,7 @@ export function mergeAnalyzeOptions(
 
   const merged: AnalyzeOptions = { ...cli };
   for (const key of Object.keys(config) as (keyof AnalyzeOptions)[]) {
-    if (key === 'stats' || key === 'defaultBranch') continue; // handled below / by resolver
+    if (key === 'stats' || key === 'sbom' || key === 'defaultBranch') continue; // handled below / by resolver
     if (merged[key] === undefined) {
       (merged as Record<string, unknown>)[key] = config[key];
     }
@@ -446,6 +449,9 @@ export function mergeAnalyzeOptions(
 
   if (config.stats !== undefined && cli.stats !== false) {
     merged.stats = config.stats;
+  }
+  if (config.sbom !== undefined && cli.sbom !== false) {
+    merged.sbom = config.sbom;
   }
 
   return merged;

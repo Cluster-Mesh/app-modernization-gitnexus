@@ -76,6 +76,12 @@ export function getResourceTemplates(): ResourceTemplate[] {
       mimeType: 'text/yaml',
     },
     {
+      uriTemplate: 'gitnexus://repo/{name}/sbom',
+      name: 'Repository SBOM',
+      description: 'Latest SBOM receipt and generation status (summary only)',
+      mimeType: 'application/json',
+    },
+    {
       uriTemplate: 'gitnexus://repo/{name}/cluster/{clusterName}',
       name: 'Module Detail',
       description: 'Deep dive into a specific functional area',
@@ -258,6 +264,8 @@ export async function readResource(uri: string, backend: LocalBackend): Promise<
       return getProcessesResource(backend, repoName);
     case 'schema':
       return getSchemaResource();
+    case 'sbom':
+      return getSbomResource(backend, repoName);
     case 'cluster':
       return getClusterDetailResource(parsed.param!, backend, repoName);
     case 'process':
@@ -265,6 +273,14 @@ export async function readResource(uri: string, backend: LocalBackend): Promise<
     default:
       throw new Error(`Unknown resource: ${uri}`);
   }
+}
+
+async function getSbomResource(backend: LocalBackend, repoName: string): Promise<string> {
+  const result = await backend.callTool('get_sbom', {
+    repo: repoName,
+    include_content: false,
+  });
+  return JSON.stringify(result, null, 2);
 }
 
 // ─── Resource Implementations ─────────────────────────────────────────

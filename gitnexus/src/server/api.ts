@@ -68,6 +68,13 @@ import { syncGroup } from '../core/group/sync.js';
 import { WikiJobManager } from './wiki-job.js';
 import { WikiGenerator } from '../core/wiki/generator.js';
 import { resolveLLMConfig, type LLMProvider } from '../core/wiki/llm-client.js';
+import {
+  getSbomStorageDir,
+  readSbomFromStorage,
+  SBOM_FORMATS,
+  SBOM_MAX_HTTP_BYTES,
+  type SbomFormat,
+} from '../core/sbom.js';
 
 const _require = createRequire(import.meta.url);
 const pkg = _require('../../package.json');
@@ -1111,6 +1118,100 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
     }
   });
 
+  // Read the latest branch-scoped SBOM. The same service is also exposed to
+  // programmatic TypeScript callers and MCP, so this route never invokes Syft
+  // or reads repository paths supplied by the request.
+  app.get('/api/repo/sbom', createRouteLimiter(), async (req, res) => {
+    try {
+      const entry = await resolveRepo(requestedRepo(req));
+      if (!entry) {
+        res.status(404).json({ error: 'Repository not found' });
+        return;
+      }
+
+      const rawBranch = req.query.branch;
+      const branch =
+        rawBranch === undefined ? undefined : assertString(rawBranch, 'branch').trim();
+      if (branch === '') {
+        res.status(400).json({ error: 'Parameter "branch" must not be empty' });
+        return;
+      }
+
+      const rawFormat = req.query.format;
+      const formatValue =
+        rawFormat === undefined ? 'cyclonedx-json' : assertString(rawFormat, 'format');
+      if (!(SBOM_FORMATS as readonly string[]).includes(formatValue)) {
+        res.status(400).json({
+          error: `"format" must be one of: ${SBOM_FORMATS.join(', ')}`,
+        });
+        return;
+      }
+      const format = formatValue as SbomFormat;
+
+      const rawIncludeContent = req.query.includeContent;
+      let includeContent = true;
+      if (rawIncludeContent !== undefined) {
+        const includeValue = assertString(rawIncludeContent, 'includeContent');
+        if (includeValue !== 'true' && includeValue !== 'false') {
+          res.status(400).json({ error: '"includeContent" must be true or false' });
+          return;
+        }
+        includeContent = includeValue === 'true';
+      }
+
+      let storageDir = getSbomStorageDir(entry.path);
+      if (branch && branch !== entry.branch) {
+        if (!entry.branches?.some((candidate) => candidate.branch === branch)) {
+          res.status(404).json({ error: `Branch "${branch}" is not indexed` });
+          return;
+        }
+        storageDir = getSbomStorageDir(entry.path, branch);
+      }
+
+      const summary = await readSbomFromStorage(storageDir, {
+        format,
+        includeContent: false,
+      });
+      if (!summary) {
+        res.status(404).json({ error: 'No SBOM has been generated for this index' });
+        return;
+      }
+      if (summary.receipt.status !== 'ready') {
+        res.status(503).json(summary);
+        return;
+      }
+      if (!includeContent) {
+        res.json(summary);
+        return;
+      }
+      const bytes = summary.receipt.documents[format]?.bytes;
+      if (bytes === undefined) {
+        res.status(503).json({ error: `No ${format} document is recorded in the SBOM receipt` });
+        return;
+      }
+      if (bytes > SBOM_MAX_HTTP_BYTES) {
+        res.status(413).json({
+          error: `SBOM content is ${bytes} bytes, above the HTTP limit of ${SBOM_MAX_HTTP_BYTES} bytes`,
+          receipt: summary.receipt,
+          format,
+          includeContent: true,
+          contentAvailable: false,
+          contentBytes: bytes,
+        });
+        return;
+      }
+      const result = await readSbomFromStorage(storageDir, { format, includeContent: true });
+      if (!result) {
+        res.status(404).json({ error: 'No SBOM has been generated for this index' });
+        return;
+      }
+      res.json(result);
+    } catch (err: any) {
+      const status = err instanceof BadRequestError ? err.status : 503;
+      res.status(status).json({ error: err.message || 'SBOM is unavailable' });
+    }
+  });
+
   // Delete a repo — removes index, clone dir (if any), and unregisters it
   // Rate-limited (CodeQL js/missing-rate-limiting): destructive operation
   // doing fs.rm of clone + storage dirs. Default 60 rpm/IP is generous for
@@ -1778,6 +1879,9 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
           force,
           embeddings,
           dropEmbeddings,
+          sbom,
+          sbomTimeout,
+          syftPath,
           token: repoToken,
         } = req.body;
 
@@ -1788,6 +1892,23 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
         }
         if (repoLocalPath !== undefined && typeof repoLocalPath !== 'string') {
           res.status(400).json({ error: '"path" must be a string' });
+          return;
+        }
+        if (sbom !== undefined && typeof sbom !== 'boolean') {
+          res.status(400).json({ error: '"sbom" must be a boolean' });
+          return;
+        }
+        if (
+          sbomTimeout !== undefined &&
+          (!Number.isInteger(sbomTimeout) || sbomTimeout < 1 || sbomTimeout > 30 * 60 * 1000)
+        ) {
+          res.status(400).json({
+            error: '"sbomTimeout" must be an integer between 1 and 1800000 milliseconds',
+          });
+          return;
+        }
+        if (syftPath !== undefined && typeof syftPath !== 'string') {
+          res.status(400).json({ error: '"syftPath" must be a string' });
           return;
         }
 
@@ -1872,7 +1993,14 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
               throw new Error('No target path resolved');
             }
 
-            launchAnalysisWorker(job, targetPath, { force, embeddings, dropEmbeddings });
+            launchAnalysisWorker(job, targetPath, {
+              force,
+              embeddings,
+              dropEmbeddings,
+              sbom,
+              sbomTimeout,
+              syftPath,
+            });
           } catch (err: any) {
             if (targetPath) releaseRepoLock(getStoragePath(targetPath));
             jobManager.updateJob(job.id, {
@@ -1923,6 +2051,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
       repoName: job.repoName,
       progress: job.progress,
       error: job.error,
+      sbom: job.sbom,
       startedAt: job.startedAt,
       completedAt: job.completedAt,
     });

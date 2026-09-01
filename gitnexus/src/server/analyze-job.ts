@@ -12,6 +12,7 @@
 import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
 import type { ChildProcess } from 'child_process';
+import type { SbomResultIpc } from './analyze-worker-ipc.js';
 
 export interface AnalyzeJobProgress {
   phase: string;
@@ -27,6 +28,7 @@ export interface AnalyzeJob {
   repoName?: string;
   progress: AnalyzeJobProgress;
   error?: string;
+  sbom?: SbomResultIpc;
   startedAt: number;
   completedAt?: number;
   /** Number of times the worker has been retried after a crash. */
@@ -96,7 +98,10 @@ export class JobManager {
   updateJob(
     id: string,
     update: Partial<
-      Pick<AnalyzeJob, 'status' | 'progress' | 'error' | 'repoPath' | 'repoName' | 'completedAt'>
+      Pick<
+        AnalyzeJob,
+        'status' | 'progress' | 'error' | 'repoPath' | 'repoName' | 'completedAt' | 'sbom'
+      >
     >,
   ) {
     const job = this.jobs.get(id);

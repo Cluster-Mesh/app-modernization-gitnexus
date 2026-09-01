@@ -4,6 +4,7 @@ type GitNexusTool = (typeof GITNEXUS_TOOLS)[number];
 
 export const MCP_READ_ONLY_TOOLS = new Set([
   'list_repos',
+  'get_sbom',
   'query',
   'context',
   'read_repo_file',

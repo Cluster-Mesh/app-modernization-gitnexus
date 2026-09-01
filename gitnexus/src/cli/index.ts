@@ -100,6 +100,18 @@ program
   )
   .option('--index-only', 'Pure index mode: skip all file injection (AGENTS.md, CLAUDE.md, skills)')
   .option(
+    '--no-sbom',
+    'Skip Syft SBOM generation. Enabled by default; existing SBOM documents are preserved.',
+  )
+  .option(
+    '--sbom-timeout <ms>',
+    'Maximum time for Syft SBOM generation in milliseconds (default: 120000; max: 1800000).',
+  )
+  .option(
+    '--syft-path <path>',
+    'Syft executable path or command name (also configurable via GITNEXUS_SYFT_PATH).',
+  )
+  .option(
     '--skip-git',
     'Treat the provided path/cwd as the index root and skip parent git-root discovery',
   )
