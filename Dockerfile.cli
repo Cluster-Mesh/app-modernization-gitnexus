@@ -83,12 +83,13 @@ RUN apt-get -o Acquire::Retries=5 update \
 # release for the supported Docker targets and retain syftPath/GITNEXUS_SYFT_PATH
 # as an override for local, air-gapped, or enterprise installations.
 RUN set -eux; \
-    case "$TARGETARCH" in \
+    target_arch="${TARGETARCH:-amd64}"; \
+    case "$target_arch" in \
       amd64) syft_sha256="$SYFT_AMD64_SHA256" ;; \
       arm64) syft_sha256="$SYFT_ARM64_SHA256" ;; \
-      *) echo "Unsupported TARGETARCH for the bundled Syft binary: $TARGETARCH" >&2; exit 1 ;; \
+      *) echo "Unsupported TARGETARCH for the bundled Syft binary: $target_arch" >&2; exit 1 ;; \
     esac; \
-    syft_archive="syft_${SYFT_VERSION}_linux_${TARGETARCH}.tar.gz"; \
+    syft_archive="syft_${SYFT_VERSION}_linux_${target_arch}.tar.gz"; \
     curl --fail --silent --show-error --location \
       "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/${syft_archive}" \
       --output "/tmp/${syft_archive}"; \
