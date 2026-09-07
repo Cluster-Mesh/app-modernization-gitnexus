@@ -45,6 +45,7 @@ export interface LaunchOptions {
   force?: boolean;
   embeddings?: boolean;
   dropEmbeddings?: boolean;
+  branch?: string;
   registryName?: string;
   sbom?: boolean;
   sbomTimeout?: number;
@@ -274,6 +275,7 @@ export function createLaunchAnalysisWorker(deps: LaunchDeps) {
           force: !!opts.force,
           embeddings: !!opts.embeddings,
           dropEmbeddings: !!opts.dropEmbeddings,
+          ...(opts.branch ? { branch: opts.branch } : {}),
           ...(opts.registryName ? { registryName: opts.registryName } : {}),
           ...(opts.sbom !== undefined ? { sbom: opts.sbom } : {}),
           ...(opts.sbomTimeout !== undefined ? { sbomTimeout: opts.sbomTimeout } : {}),

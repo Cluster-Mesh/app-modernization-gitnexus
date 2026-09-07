@@ -300,8 +300,16 @@ export function warnIfInsecureAzureConfig(): void {
   }
 }
 
-export function buildCloneArgs(url: string, targetDir: string): string[] {
-  return ['clone', '--depth', '1', '--', url, targetDir];
+export function buildCloneArgs(url: string, targetDir: string, branch?: string): string[] {
+  return [
+    'clone',
+    '--depth',
+    '1',
+    ...(branch ? ['--branch', branch] : []),
+    '--',
+    url,
+    targetDir,
+  ];
 }
 
 /**
@@ -443,7 +451,7 @@ export async function cloneOrPull(
   url: string,
   targetDir: string,
   onProgress?: (progress: CloneProgress) => void,
-  options?: { token?: string },
+  options?: { token?: string; branch?: string },
 ): Promise<string> {
   // Containment barrier — inline with the canonical path.relative idiom so
   // CodeQL recognizes the sanitizer at every following filesystem and
@@ -478,11 +486,25 @@ export async function cloneOrPull(
     // whatever remote the dir was originally cloned from.
     await assertRemoteMatchesRequestedUrl(safeTarget, url);
     onProgress?.({ phase: 'pulling', message: 'Pulling latest changes...' });
+    if (options?.branch) {
+      await runGit(['fetch', '--prune', 'origin', options.branch], safeTarget, {
+        token: options.token,
+        url,
+      });
+      await runGit(
+        ['checkout', '--force', '-B', options.branch, `origin/${options.branch}`],
+        safeTarget,
+        { token: options.token, url },
+      );
+    }
     await runGit(['pull', '--ff-only'], safeTarget, { token: options?.token, url });
   } else {
     await fs.mkdir(path.dirname(safeTarget), { recursive: true });
     onProgress?.({ phase: 'cloning', message: `Cloning ${url}...` });
-    await runGit(buildCloneArgs(url, safeTarget), undefined, { token: options?.token, url });
+    await runGit(buildCloneArgs(url, safeTarget, options?.branch), undefined, {
+      token: options?.token,
+      url,
+    });
   }
 
   return safeTarget;

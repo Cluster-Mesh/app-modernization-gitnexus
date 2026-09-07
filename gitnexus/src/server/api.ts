@@ -74,6 +74,7 @@ import {
   SBOM_FORMATS,
   SBOM_MAX_HTTP_BYTES,
   type SbomFormat,
+  type SbomReceipt,
 } from '../core/sbom.js';
 
 const _require = createRequire(import.meta.url);
@@ -1072,20 +1073,142 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
   app.get('/api/repos', async (_req, res) => {
     try {
       const repos = await listRegisteredRepos();
-      res.json(
-        repos.map((r) => ({
-          name: r.name,
-          path: r.path,
-          repoPath: r.path,
-          indexedAt: r.indexedAt,
-          lastCommit: r.lastCommit,
-          stats: r.stats,
-        })),
+      const result = await Promise.all(
+        repos.map(async (r) => {
+          let sbomStatus: string = 'missing';
+          let sbom: SbomReceipt | undefined;
+          try {
+            const summary = await readSbomFromStorage(getSbomStorageDir(r.path, r.branch), {
+              includeContent: false,
+            });
+            if (summary) {
+              sbom = summary.receipt;
+              sbomStatus = summary.receipt.status;
+            }
+          } catch {
+            sbomStatus = 'unavailable';
+          }
+          return {
+            name: r.name,
+            path: r.path,
+            repoPath: r.path,
+            indexedAt: r.indexedAt,
+            lastCommit: r.lastCommit,
+            remoteUrl: r.remoteUrl,
+            branch: r.branch,
+            branches: r.branches,
+            stats: r.stats,
+            sbomStatus,
+            ...(sbom ? { sbom } : {}),
+          };
+        }),
       );
+      res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to list repos' });
     }
   });
+
+  // Re-index an already registered clone. The registry entry is the source of
+  // truth for remote, branch and target path: callers cannot create a second
+  // clone or redirect the job to an arbitrary filesystem location.
+  app.post(
+    '/api/repos/:name/reindex',
+    createRouteLimiter({ limit: 10 }),
+    requireLocalhostOrigin,
+    async (req, res) => {
+      try {
+        const name = assertString(req.params.name, 'name');
+        const entry = await resolveRepo(name);
+        if (!entry || entry.__timedOut) {
+          res.status(404).json({ error: 'Repository not found' });
+          return;
+        }
+        if (!entry.remoteUrl) {
+          res.status(409).json({
+            error: 'Repository has no registered remote URL and cannot be re-indexed',
+          });
+          return;
+        }
+
+        const repoToken = req.body?.token;
+        const tokenError = validateAnalyzeToken(repoToken, entry.remoteUrl);
+        if (tokenError) {
+          res.status(tokenError.status).json({ error: tokenError.error });
+          return;
+        }
+
+        const active = jobManager.listJobs().find((candidate) => {
+          if (candidate.status === 'complete' || candidate.status === 'failed') return false;
+          const samePath =
+            !!candidate.repoPath &&
+            registryPathEquals(
+              canonicalizePath(candidate.repoPath),
+              canonicalizePath(entry.path),
+            );
+          const sameRemote = candidate.repoUrl === entry.remoteUrl;
+          return (samePath || sameRemote) && candidate.branch === entry.branch;
+        });
+        if (active) {
+          res.status(409).json({ error: 'Analysis already in progress for this repository' });
+          return;
+        }
+
+        const job = jobManager.createJob({
+          repoUrl: entry.remoteUrl,
+          repoPath: entry.path,
+          branch: entry.branch,
+        });
+        jobManager.updateJob(job.id, {
+          status: 'cloning',
+          repoName: entry.name,
+          repoPath: entry.path,
+        });
+
+        void (async () => {
+          try {
+            await cloneOrPull(
+              entry.remoteUrl!,
+              entry.path,
+              (progress) => {
+                jobManager.updateJob(job.id, {
+                  progress: { phase: progress.phase, percent: 5, message: progress.message },
+                });
+              },
+              {
+                token: repoToken,
+                branch: entry.branch,
+              },
+            );
+            launchAnalysisWorker(job, entry.path, {
+              force: true,
+              sbom: true,
+              branch: entry.branch,
+            });
+          } catch (err: any) {
+            releaseRepoLock(getStoragePath(entry.path));
+            jobManager.updateJob(job.id, {
+              status: 'failed',
+              error: err.message || 'Re-index failed',
+            });
+          }
+        })();
+
+        res.status(202).json({
+          jobId: job.id,
+          status: job.status,
+          repoName: entry.name,
+          branch: entry.branch,
+        });
+      } catch (err: any) {
+        if (err.message?.includes('already in progress')) {
+          res.status(409).json({ error: err.message });
+        } else {
+          res.status(500).json({ error: err.message || 'Failed to start re-index' });
+        }
+      }
+    },
+  );
 
   // Get repo info
   // Rate-limited (CodeQL js/missing-rate-limiting): resolveRepo canonicalizes
@@ -1882,6 +2005,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
           sbom,
           sbomTimeout,
           syftPath,
+          branch,
           token: repoToken,
         } = req.body;
 
@@ -1909,6 +2033,18 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
         }
         if (syftPath !== undefined && typeof syftPath !== 'string') {
           res.status(400).json({ error: '"syftPath" must be a string' });
+          return;
+        }
+        if (
+          branch !== undefined &&
+          (typeof branch !== 'string' ||
+            branch.length === 0 ||
+            branch.length > 255 ||
+            /[\u0000-\u001f\u007f]/u.test(branch))
+        ) {
+          res.status(400).json({
+            error: '"branch" must be a non-empty string without control characters',
+          });
           return;
         }
 
@@ -1941,7 +2077,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
           return;
         }
 
-        const job = jobManager.createJob({ repoUrl, repoPath: repoLocalPath });
+        const job = jobManager.createJob({ repoUrl, repoPath: repoLocalPath, branch });
 
         // If job was already running (dedup), just return its id. The token is
         // not part of the dedup identity and is never stored on the job, so a
@@ -1985,7 +2121,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
                     progress: { phase: progress.phase, percent: 5, message: progress.message },
                   });
                 },
-                repoToken ? { token: repoToken } : undefined,
+                repoToken || branch ? { token: repoToken, branch } : undefined,
               );
             }
 
@@ -2000,6 +2136,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
               sbom,
               sbomTimeout,
               syftPath,
+              branch,
             });
           } catch (err: any) {
             if (targetPath) releaseRepoLock(getStoragePath(targetPath));
@@ -2049,6 +2186,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
       repoUrl: job.repoUrl,
       repoPath: job.repoPath,
       repoName: job.repoName,
+      branch: job.branch,
       progress: job.progress,
       error: job.error,
       sbom: job.sbom,

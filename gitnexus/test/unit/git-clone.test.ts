@@ -338,6 +338,24 @@ describe('git-clone', () => {
       expect(depthIdx).toBeLessThan(args.indexOf('--'));
     });
 
+    it('pins the initial clone to the registered branch when provided', () => {
+      const args = buildCloneArgs(
+        'https://github.com/owner/repo.git',
+        '/safe/target',
+        'release/v4',
+      );
+      expect(args).toEqual([
+        'clone',
+        '--depth',
+        '1',
+        '--branch',
+        'release/v4',
+        '--',
+        'https://github.com/owner/repo.git',
+        '/safe/target',
+      ]);
+    });
+
     it('never embeds a token in argv: credentials travel through env, not URL', () => {
       // buildCloneArgs is URL-only; the credential must travel through env
       // (buildGitEnv) so it cannot appear in `ps auxww` or in command logs.

@@ -26,6 +26,7 @@ export interface AnalyzeJob {
   repoUrl?: string;
   repoPath?: string;
   repoName?: string;
+  branch?: string;
   progress: AnalyzeJobProgress;
   error?: string;
   sbom?: SbomResultIpc;
@@ -52,14 +53,15 @@ export class JobManager {
   }
 
   /** Create a new job, or return existing active job for the same repo. */
-  createJob(params: { repoUrl?: string; repoPath?: string }): AnalyzeJob {
+  createJob(params: { repoUrl?: string; repoPath?: string; branch?: string }): AnalyzeJob {
     // Dedup: return existing active job for the same repo (by URL or path)
     for (const job of this.jobs.values()) {
       if (!this.isTerminal(job.status)) {
         const isSameRepo =
           (params.repoUrl && job.repoUrl === params.repoUrl) ||
           (params.repoPath && job.repoPath === params.repoPath);
-        if (isSameRepo) {
+        const sameBranch = params.branch === job.branch;
+        if (isSameRepo && sameBranch) {
           return job;
         }
       }
@@ -77,6 +79,7 @@ export class JobManager {
       status: 'queued',
       repoUrl: params.repoUrl,
       repoPath: params.repoPath,
+      branch: params.branch,
       progress: { phase: 'queued', percent: 0, message: 'Waiting to start...' },
       startedAt: Date.now(),
       retryCount: 0,
