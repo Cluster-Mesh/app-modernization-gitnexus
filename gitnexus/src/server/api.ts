@@ -1078,7 +1078,11 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
           let sbomStatus: string = 'missing';
           let sbom: SbomReceipt | undefined;
           try {
-            const summary = await readSbomFromStorage(getSbomStorageDir(r.path, r.branch), {
+            // The registry branch is the informational label of the flat
+            // primary slot. Passing it here would incorrectly redirect reads
+            // to branches/<slug>, which is reserved for explicit secondary
+            // branch indexes.
+            const summary = await readSbomFromStorage(getSbomStorageDir(r.path), {
               includeContent: false,
             });
             if (summary) {
