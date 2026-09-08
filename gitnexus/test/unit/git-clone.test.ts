@@ -409,12 +409,21 @@ describe('git-clone', () => {
 
     it('injects a host-scoped Basic-auth header when a github.com token is provided', () => {
       const env = buildGitEnv({}, { token: 'ghp_secret123', url: 'https://github.com/owner/repo' });
-      expect(env.GIT_CONFIG_COUNT).toBe('1');
-      // Host-scoped key: the header attaches only to this origin's requests.
+      expect(env.GIT_CONFIG_COUNT).toBe('2');
+      // Both remote spellings are scoped to this repository.
       expect(env.GIT_CONFIG_KEY_0).toBe('http.https://github.com/owner/repo.extraHeader');
+      expect(env.GIT_CONFIG_KEY_1).toBe('http.https://github.com/owner/repo.git.extraHeader');
       const expected =
         'Authorization: Basic ' + Buffer.from('x-access-token:ghp_secret123').toString('base64');
       expect(env.GIT_CONFIG_VALUE_0).toBe(expected);
+      expect(env.GIT_CONFIG_VALUE_1).toBe(expected);
+    });
+
+    it('covers a remote URL with and without the trailing .git suffix', () => {
+      const env = buildGitEnv({}, { token: 'ghp_secret123', url: 'https://github.com/owner/repo.git' });
+      expect(env.GIT_CONFIG_COUNT).toBe('2');
+      expect(env.GIT_CONFIG_KEY_0).toBe('http.https://github.com/owner/repo.git.extraHeader');
+      expect(env.GIT_CONFIG_KEY_1).toBe('http.https://github.com/owner/repo.extraHeader');
     });
 
     it('does not inject a token for a non-github host (defense-in-depth host bind)', () => {
@@ -438,12 +447,16 @@ describe('git-clone', () => {
       process.env.AZURE_DEVOPS_PAT = 'azure-pat-xyz';
       try {
         const env = buildGitEnv({}, { url: 'https://dev.azure.com/org/proj/_git/repo' });
-        expect(env.GIT_CONFIG_COUNT).toBe('1');
+        expect(env.GIT_CONFIG_COUNT).toBe('2');
         expect(env.GIT_CONFIG_KEY_0).toBe(
           'http.https://dev.azure.com/org/proj/_git/repo.extraHeader',
         );
+        expect(env.GIT_CONFIG_KEY_1).toBe(
+          'http.https://dev.azure.com/org/proj/_git/repo.git.extraHeader',
+        );
         const expected = 'Authorization: Basic ' + Buffer.from(':azure-pat-xyz').toString('base64');
         expect(env.GIT_CONFIG_VALUE_0).toBe(expected);
+        expect(env.GIT_CONFIG_VALUE_1).toBe(expected);
       } finally {
         if (prev === undefined) delete process.env.AZURE_DEVOPS_PAT;
         else process.env.AZURE_DEVOPS_PAT = prev;
@@ -457,8 +470,8 @@ describe('git-clone', () => {
       process.env.AZURE_DEVOPS_PAT = 'azure-pat-xyz';
       try {
         const env = buildGitEnv({}, { token: 'ghp_secret123', url: 'https://github.com/o/r' });
-        expect(env.GIT_CONFIG_COUNT).toBe('1');
-        expect(env.GIT_CONFIG_VALUE_1).toBeUndefined();
+        expect(env.GIT_CONFIG_COUNT).toBe('2');
+        expect(env.GIT_CONFIG_VALUE_2).toBeUndefined();
         for (const value of Object.values(env)) {
           expect(String(value)).not.toContain('azure-pat-xyz');
         }
@@ -473,13 +486,15 @@ describe('git-clone', () => {
         { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'http.sslVerify', GIT_CONFIG_VALUE_0: 'true' },
         { token: 'ghp_secret123', url: 'https://github.com/o/r' },
       );
-      expect(env.GIT_CONFIG_COUNT).toBe('2');
+      expect(env.GIT_CONFIG_COUNT).toBe('3');
       // Operator's pre-existing config is preserved at index 0.
       expect(env.GIT_CONFIG_KEY_0).toBe('http.sslVerify');
       expect(env.GIT_CONFIG_VALUE_0).toBe('true');
-      // Our credential is appended at index 1.
+      // Our path-scoped credentials are appended after the operator config.
       expect(env.GIT_CONFIG_KEY_1).toBe('http.https://github.com/o/r.extraHeader');
       expect(env.GIT_CONFIG_VALUE_1).toContain('Authorization: Basic ');
+      expect(env.GIT_CONFIG_KEY_2).toBe('http.https://github.com/o/r.git.extraHeader');
+      expect(env.GIT_CONFIG_VALUE_2).toContain('Authorization: Basic ');
     });
 
     it('strips control characters from the config key (no key injection)', () => {

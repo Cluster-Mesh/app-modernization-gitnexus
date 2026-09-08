@@ -535,7 +535,7 @@ export const GITHUB_TOKEN_HOSTS: ReadonlySet<string> = new Set(['github.com', 'w
  * redirect a credential to an arbitrary host — the host is matched against
  * fixed server-side allowlists (GITHUB_TOKEN_HOSTS, isAzureDevOpsUrl's
  * dev.azure.com/*.visualstudio.com/configured AZURE_DEVOPS_URL), and the
- * emitted header is host-scoped (buildExtraHeaderKey). A URL outside the
+ * emitted header is path-scoped (buildExtraHeaderKeys). A URL outside the
  * allowlists yields no credential. The selection is therefore server-policy,
  * not a bypass the user can steer.
  */
@@ -566,16 +566,19 @@ function resolveGitCredential(options?: { token?: string; url?: string }): strin
 }
 
 /**
- * Build the host-scoped git config key `http.<origin+path>.extraHeader` from
+ * Build host-scoped git config keys `http.<origin+path>.extraHeader` from
  * the raw clone URL, so the Authorization header is attached only to the
- * intended origin (and its clone sub-requests like /info/refs), never a
- * redirect target. Derived from the SAME raw URL git clones from — not the
- * normalize-for-compare form, which strips `.git` and would desync the key
- * from the wire URL and silently disable the header. Userinfo/query/fragment
- * are dropped (not part of git's URL match) and control characters stripped
- * (git rejects a newline in a config key outright).
+ * intended repository and its clone sub-requests such as /info/refs, never
+ * an unrelated redirect target.
+ *
+ * Git remotes may canonicalize the same repository with or without a trailing
+ * `.git` (for example, the registry URL can omit it while origin includes it).
+ * Register both equivalent path forms so the credential applies to the URL
+ * Git actually sends on the wire. Userinfo/query/fragment are dropped (not
+ * part of git's URL match) and control characters are stripped (git rejects a
+ * newline in a config key outright).
  */
-function buildExtraHeaderKey(url: string): string | undefined {
+function buildExtraHeaderKeys(url: string): string[] {
   let scoped: string;
   try {
     const u = new URL(url);
@@ -583,12 +586,22 @@ function buildExtraHeaderKey(url: string): string | undefined {
     u.password = '';
     u.search = '';
     u.hash = '';
-    scoped = `${u.protocol}//${u.host}${u.pathname}`;
+    let pathname = u.pathname;
+    while (pathname.length > 1 && pathname.endsWith('/')) {
+      pathname = pathname.slice(0, -1);
+    }
+    scoped = `${u.protocol}//${u.host}${pathname}`;
   } catch {
-    return undefined;
+    return [];
   }
   scoped = scoped.replace(/[\r\n\0]/g, '');
-  return `http.${scoped}.extraHeader`;
+  const variants = [scoped];
+  if (scoped.endsWith('.git')) {
+    variants.push(scoped.slice(0, -4));
+  } else if (!scoped.endsWith('/')) {
+    variants.push(`${scoped}.git`);
+  }
+  return [...new Set(variants)].map((variant) => `http.${variant}.extraHeader`);
 }
 
 /**
@@ -612,11 +625,10 @@ function warnIfCleartextCredential(url?: string): void {
 
 /**
  * Build the spawn env for `git`. Suppresses credential prompts and, when a
- * credential resolves (see resolveGitCredential), injects a single
- * host-scoped Authorization header via the `GIT_CONFIG_*` env protocol
- * (git ≥2.31) so credentials never appear in argv or the URL. Appends after
- * any existing `GIT_CONFIG_COUNT` rather than overwriting it. Exported for
- * unit tests.
+ * credential resolves (see resolveGitCredential), injects path-scoped
+ * Authorization header entries via the `GIT_CONFIG_*` env protocol (git ≥2.31)
+ * so credentials never appear in argv or the URL. Appends after any existing
+ * `GIT_CONFIG_COUNT` rather than overwriting it. Exported for unit tests.
  */
 export function buildGitEnv(
   baseEnv: NodeJS.ProcessEnv,
@@ -639,15 +651,18 @@ export function buildGitEnv(
   };
 
   const credential = resolveGitCredential(options);
-  const key = options?.url ? buildExtraHeaderKey(options.url) : undefined;
-  if (credential && key) {
+  const keys = options?.url ? buildExtraHeaderKeys(options.url) : [];
+  if (credential && keys.length > 0) {
     // Append after any GIT_CONFIG_* the operator already set, so we never
     // clobber their git config (e.g. an enforced http.sslVerify).
     const existing = Number.parseInt(env.GIT_CONFIG_COUNT ?? '', 10);
     const base = Number.isInteger(existing) && existing > 0 ? existing : 0;
-    env.GIT_CONFIG_COUNT = String(base + 1);
-    env[`GIT_CONFIG_KEY_${base}`] = key;
-    env[`GIT_CONFIG_VALUE_${base}`] = `Authorization: Basic ${credential}`;
+    const value = `Authorization: Basic ${credential}`;
+    for (const [offset, key] of keys.entries()) {
+      env[`GIT_CONFIG_KEY_${base + offset}`] = key;
+      env[`GIT_CONFIG_VALUE_${base + offset}`] = value;
+    }
+    env.GIT_CONFIG_COUNT = String(base + keys.length);
     warnIfCleartextCredential(options?.url);
   }
 
@@ -658,7 +673,7 @@ export function buildGitEnv(
 // GitHub `token` and the clone `url`. buildGitEnv injects at most ONE
 // host-scoped Authorization header (GitHub PAT for github.com, else the
 // server's AZURE_DEVOPS_PAT for Azure hosts) via the GIT_CONFIG_* protocol —
-// never in argv. See resolveGitCredential / buildExtraHeaderKey.
+// never in argv. See resolveGitCredential / buildExtraHeaderKeys.
 function runGit(
   args: string[],
   cwd?: string,
