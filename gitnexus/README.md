@@ -194,6 +194,15 @@ cancelled run, invalid output, or persistence error is reported as a degraded
 analysis result while the graph index remains usable. A matching receipt for
 the current commit is reused; `--repair-fts` does not generate or refresh an SBOM.
 
+Repository analysis accepts public and private Git remotes over HTTP(S). The
+optional `token` is sent as a path-scoped Basic-auth credential with the
+compatibility username `x-access-token`; callers can provide an optional
+`username` for providers such as GitLab (`oauth2` or `gitlab-ci-token`) and
+Bitbucket (`x-token-auth`). The token is transient and is not persisted for
+future reindex jobs. SSH remotes, Bearer/custom headers, credential helpers,
+submodules, and Git LFS require separate configuration and are not enabled by
+this HTTP(S) credential path.
+
 The HTTP server exposes the latest document at
 `GET /api/repo/sbom?repo=<name>&format=cyclonedx-json|spdx-json`. Content is included
 by default; use `includeContent=false` for receipt metadata. The typed service

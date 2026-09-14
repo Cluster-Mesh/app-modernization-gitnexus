@@ -48,7 +48,6 @@ import {
   getCloneDir,
   cloneOrPull,
   warnIfInsecureAzureConfig,
-  GITHUB_TOKEN_HOSTS,
 } from './git-clone.js';
 import { createAnalyzeUploadHandler } from './analyze-upload.js';
 import { createLocalhostOriginGuard, normalizeBoundHost } from './middleware.js';
@@ -805,11 +804,12 @@ export const handleQueryRequest = async (
  * Validate the optional `token` field of POST /api/analyze. Returns an
  * { status, error } to send, or null when the token is absent or valid.
  *
- * The token is a GitHub PAT: charset-restricted (blocks CRLF header
- * smuggling), length-bounded (1–256), and bound to github.com using the SAME
- * GITHUB_TOKEN_HOSTS allowlist + hostname parse as resolveGitCredential, so a
- * token the API accepts is exactly the one buildGitEnv will inject — and one
- * it rejects is never sent off github.com.
+ * The token is provider-neutral for supported HTTP(S) Git remotes:
+ * charset-restricted (blocks CRLF header smuggling), length-bounded (1–256),
+ * and accepted for any valid HTTP(S) URL. `cloneOrPull` performs the
+ * transport/SSRF validation before invoking Git, so this function does not
+ * maintain a provider-specific host allowlist. An optional `username` selects
+ * the Basic-auth username and defaults to `x-access-token`.
  *
  * Exported for unit tests (the route validation is otherwise only reachable
  * by booting the server).
@@ -817,23 +817,44 @@ export const handleQueryRequest = async (
 export function validateAnalyzeToken(
   repoToken: unknown,
   repoUrl: unknown,
+  repoUsername?: unknown,
 ): { status: number; error: string } | null {
-  if (repoToken === undefined) return null;
+  if (repoToken === undefined) {
+    if (repoUsername !== undefined) {
+      return { status: 400, error: '"username" requires "token"' };
+    }
+    return null;
+  }
   if (typeof repoToken !== 'string') return { status: 400, error: '"token" must be a string' };
   if (repoToken.length === 0 || repoToken.length > 256)
     return { status: 400, error: '"token" length must be between 1 and 256' };
   if (!/^[A-Za-z0-9._~+/=-]+$/.test(repoToken))
     return { status: 400, error: '"token" contains invalid characters' };
+  if (repoUsername !== undefined) {
+    if (typeof repoUsername !== 'string') {
+      return { status: 400, error: '"username" must be a string' };
+    }
+    if (repoUsername.length === 0 || repoUsername.length > 256) {
+      return { status: 400, error: '"username" length must be between 1 and 256' };
+    }
+    if (!/^[A-Za-z0-9._~+/@=-]+$/.test(repoUsername)) {
+      return { status: 400, error: '"username" contains invalid characters' };
+    }
+  }
   if (!repoUrl || typeof repoUrl !== 'string')
     return { status: 400, error: '"token" requires "url"' };
-  let tokenHost: string;
+  let parsedUrl: URL;
   try {
-    tokenHost = new URL(repoUrl).hostname.toLowerCase();
+    parsedUrl = new URL(repoUrl);
   } catch {
     return { status: 400, error: '"url" must be a valid URL when "token" is provided' };
   }
-  if (!GITHUB_TOKEN_HOSTS.has(tokenHost))
-    return { status: 400, error: '"token" is only supported for github.com URLs' };
+  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+    return {
+      status: 400,
+      error: '"url" must use http:// or https:// when "token" is provided',
+    };
+  }
   return null;
 }
 
@@ -1136,7 +1157,8 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
         }
 
         const repoToken = req.body?.token;
-        const tokenError = validateAnalyzeToken(repoToken, entry.remoteUrl);
+        const repoUsername = req.body?.username;
+        const tokenError = validateAnalyzeToken(repoToken, entry.remoteUrl, repoUsername);
         if (tokenError) {
           res.status(tokenError.status).json({ error: tokenError.error });
           return;
@@ -1181,6 +1203,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
               },
               {
                 token: repoToken,
+                username: repoUsername,
                 branch: entry.branch,
               },
             );
@@ -2011,6 +2034,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
           syftPath,
           branch,
           token: repoToken,
+          username: repoUsername,
         } = req.body;
 
         // Input type validation
@@ -2057,9 +2081,10 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
           return;
         }
 
-        // Token: optional, restricted charset to prevent header smuggling
-        // (CRLF), bound length, and bound to github.com (see validateAnalyzeToken).
-        const tokenError = validateAnalyzeToken(repoToken, repoUrl);
+        // Token: optional, provider-neutral for supported HTTP(S) remotes;
+        // username defaults to x-access-token and both values are restricted
+        // to prevent Basic-auth/header injection.
+        const tokenError = validateAnalyzeToken(repoToken, repoUrl, repoUsername);
         if (tokenError) {
           res.status(tokenError.status).json({ error: tokenError.error });
           return;
@@ -2125,7 +2150,9 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
                     progress: { phase: progress.phase, percent: 5, message: progress.message },
                   });
                 },
-                repoToken || branch ? { token: repoToken, branch } : undefined,
+                repoToken || branch
+                  ? { token: repoToken, username: repoUsername, branch }
+                  : undefined,
               );
             }
 

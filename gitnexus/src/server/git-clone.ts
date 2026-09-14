@@ -451,7 +451,7 @@ export async function cloneOrPull(
   url: string,
   targetDir: string,
   onProgress?: (progress: CloneProgress) => void,
-  options?: { token?: string; branch?: string },
+  options?: { token?: string; username?: string; branch?: string },
 ): Promise<string> {
   // Containment barrier — inline with the canonical path.relative idiom so
   // CodeQL recognizes the sanitizer at every following filesystem and
@@ -489,20 +489,26 @@ export async function cloneOrPull(
     if (options?.branch) {
       await runGit(['fetch', '--prune', 'origin', options.branch], safeTarget, {
         token: options.token,
+        username: options.username,
         url,
       });
       await runGit(
         ['checkout', '--force', '-B', options.branch, `origin/${options.branch}`],
         safeTarget,
-        { token: options.token, url },
+        { token: options.token, username: options.username, url },
       );
     }
-    await runGit(['pull', '--ff-only'], safeTarget, { token: options?.token, url });
+    await runGit(['pull', '--ff-only'], safeTarget, {
+      token: options?.token,
+      username: options?.username,
+      url,
+    });
   } else {
     await fs.mkdir(path.dirname(safeTarget), { recursive: true });
     onProgress?.({ phase: 'cloning', message: `Cloning ${url}...` });
     await runGit(buildCloneArgs(url, safeTarget, options?.branch), undefined, {
       token: options?.token,
+      username: options?.username,
       url,
     });
   }
@@ -511,52 +517,44 @@ export async function cloneOrPull(
 }
 
 /**
- * Hosts the per-request GitHub PAT may be sent to. Exported so the
- * /api/analyze boundary check and this injection-site check share one
- * allowlist (they must agree, or a token accepted by the API could be
- * silently dropped — or worse — at injection).
- */
-export const GITHUB_TOKEN_HOSTS: ReadonlySet<string> = new Set(['github.com', 'www.github.com']);
-
-/**
- * Resolve at most ONE git credential for a clone/pull, by server-side policy
- * keyed on the clone host against a fixed allowlist (never a free-form user
- * toggle):
- *   1. a per-request GitHub PAT — only for hosts in GITHUB_TOKEN_HOSTS;
- *   2. else the server's AZURE_DEVOPS_PAT — only for Azure DevOps hosts;
+ * Resolve at most ONE git credential for a clone/pull:
+ *   1. a per-request token for any validated HTTP(S) Git remote, using the
+ *      requested username or the compatibility default `x-access-token`;
+ *   2. otherwise the server's AZURE_DEVOPS_PAT for Azure DevOps hosts;
  *   3. else none.
- * The two host sets are disjoint, so at most one credential ever applies; the
- * GitHub token taking precedence is deterministic for the pathological case
- * where AZURE_DEVOPS_URL is itself configured to a github.com host. Returns
- * the base64 of the Basic-auth `user:secret` pair, or undefined.
  *
- * Security note (re CodeQL js/user-controlled-bypass): the clone URL is
- * user-controlled and selects WHICH credential applies, but it cannot
- * redirect a credential to an arbitrary host — the host is matched against
- * fixed server-side allowlists (GITHUB_TOKEN_HOSTS, isAzureDevOpsUrl's
- * dev.azure.com/*.visualstudio.com/configured AZURE_DEVOPS_URL), and the
- * emitted header is path-scoped (buildExtraHeaderKeys). A URL outside the
- * allowlists yields no credential. The selection is therefore server-policy,
- * not a bypass the user can steer.
+ * The requested token is caller-supplied and is sent only to the requested
+ * remote URL. `cloneOrPull` validates that URL before this function is reached,
+ * while the HTTP(S) check below keeps the credential path safe for direct
+ * callers of the exported environment builder. Returns the base64 of the
+ * Basic-auth `user:secret` pair, or undefined.
+ *
+ * The emitted header is path-scoped by buildExtraHeaderKeys, so it applies
+ * only to the requested repository URL and its `.git` spelling.
  */
-function resolveGitCredential(options?: { token?: string; url?: string }): string | undefined {
+function resolveGitCredential(options?: {
+  token?: string;
+  username?: string;
+  url?: string;
+}): string | undefined {
   const url = options?.url;
   if (!url) return undefined;
 
-  let host: string;
+  let parsed: URL;
   try {
-    host = new URL(url).hostname.toLowerCase();
+    parsed = new URL(url);
   } catch {
     return undefined;
   }
 
-  // 1. Per-request GitHub PAT — github.com only (mirrors the /api/analyze
-  //    host-bind so the user's token is never sent off github.com).
-  if (options.token && GITHUB_TOKEN_HOSTS.has(host)) {
-    return Buffer.from(`x-access-token:${options.token}`).toString('base64');
+  // 1. Per-request token for every supported HTTP(S) Git provider.
+  if (options.token && (parsed.protocol === 'http:' || parsed.protocol === 'https:')) {
+    const username = options.username ?? 'x-access-token';
+    return Buffer.from(`${username}:${options.token}`).toString('base64');
   }
 
-  // 2. Server-configured Azure DevOps PAT — Azure hosts only.
+  // 2. Server-configured Azure DevOps PAT remains the non-interactive
+  //    fallback when no per-request token was supplied.
   const azurePat = process.env.AZURE_DEVOPS_PAT;
   if (azurePat && isAzureDevOpsUrl(url)) {
     return Buffer.from(`:${azurePat}`).toString('base64');
@@ -632,7 +630,7 @@ function warnIfCleartextCredential(url?: string): void {
  */
 export function buildGitEnv(
   baseEnv: NodeJS.ProcessEnv,
-  options?: { token?: string; url?: string },
+  options?: { token?: string; username?: string; url?: string },
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...baseEnv,
@@ -670,14 +668,14 @@ export function buildGitEnv(
 }
 
 // `options` carries the inputs the credential resolver needs: a per-request
-// GitHub `token` and the clone `url`. buildGitEnv injects at most ONE
-// host-scoped Authorization header (GitHub PAT for github.com, else the
-// server's AZURE_DEVOPS_PAT for Azure hosts) via the GIT_CONFIG_* protocol —
-// never in argv. See resolveGitCredential / buildExtraHeaderKeys.
+// token, optional username, and the clone `url`. buildGitEnv injects at most
+// ONE credential (request token for any HTTP(S) provider, else the server's
+// AZURE_DEVOPS_PAT for Azure hosts) via the GIT_CONFIG_* protocol — never in
+// argv. See resolveGitCredential / buildExtraHeaderKeys.
 function runGit(
   args: string[],
   cwd?: string,
-  options?: { token?: string; url?: string },
+  options?: { token?: string; username?: string; url?: string },
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const proc = spawn('git', args, {

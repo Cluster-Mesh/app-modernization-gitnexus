@@ -9,8 +9,9 @@
  * otherwise only reachable by booting the server."
  *
  * Only rejection paths are asserted: each returns 400 BEFORE any clone, so the
- * test is hermetic (no network, no background git, no real repo). The accepted
- * path would spawn a background clone and is left to the unit coverage.
+ * test is hermetic (no network, no background git, no real repo). Provider
+ * acceptance is covered by the unit tests; an accepted path would spawn a
+ * background clone.
  *
  * Mirrors the spawn+health-poll harness in server-http-startup.test.ts; the
  * integration suite always builds dist first (pretest:integration).
@@ -153,22 +154,13 @@ describeBlock('POST /api/analyze token validation (real server)', () => {
     }
   });
 
-  it('rejects a GitHub token paired with a non-github host (finding 6)', async () => {
+  it('rejects a token paired with an unsupported SSH URL', async () => {
     const { status, body } = await postAnalyze(port, {
-      url: 'https://gitlab.com/owner/repo',
-      token: 'ghp_validformat123',
+      url: 'ssh://git@example.com/org/repo',
+      token: 'token_validformat123',
     });
     expect(status).toBe(400);
-    expect(JSON.parse(body).error).toContain('only supported for github.com');
-  });
-
-  it('rejects a GitHub token paired with an Azure DevOps URL (cross-credential trigger)', async () => {
-    const { status, body } = await postAnalyze(port, {
-      url: 'https://dev.azure.com/org/proj/_git/repo',
-      token: 'ghp_validformat123',
-    });
-    expect(status).toBe(400);
-    expect(JSON.parse(body).error).toContain('only supported for github.com');
+    expect(JSON.parse(body).error).toContain('must use http:// or https://');
   });
 
   it('rejects a token whose characters could smuggle a header (CRLF/space)', async () => {

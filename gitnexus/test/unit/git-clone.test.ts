@@ -426,9 +426,30 @@ describe('git-clone', () => {
       expect(env.GIT_CONFIG_KEY_1).toBe('http.https://github.com/owner/repo.extraHeader');
     });
 
-    it('does not inject a token for a non-github host (defense-in-depth host bind)', () => {
+    it('injects a request token for a non-GitHub HTTPS host', () => {
       const env = buildGitEnv({}, { token: 'ghp_secret123', url: 'https://gitlab.com/owner/repo' });
-      expect(env.GIT_CONFIG_COUNT).toBeUndefined();
+      expect(env.GIT_CONFIG_COUNT).toBe('2');
+      expect(env.GIT_CONFIG_KEY_0).toBe('http.https://gitlab.com/owner/repo.extraHeader');
+      expect(env.GIT_CONFIG_KEY_1).toBe('http.https://gitlab.com/owner/repo.git.extraHeader');
+      const expected =
+        'Authorization: Basic ' + Buffer.from('x-access-token:ghp_secret123').toString('base64');
+      expect(env.GIT_CONFIG_VALUE_0).toBe(expected);
+      expect(env.GIT_CONFIG_VALUE_1).toBe(expected);
+    });
+
+    it('uses an explicit provider-specific Basic-auth username', () => {
+      const env = buildGitEnv(
+        {},
+        {
+          token: 'glpat_secret123',
+          username: 'oauth2',
+          url: 'https://gitlab.com/owner/repo',
+        },
+      );
+      const expected =
+        'Authorization: Basic ' + Buffer.from('oauth2:glpat_secret123').toString('base64');
+      expect(env.GIT_CONFIG_VALUE_0).toBe(expected);
+      expect(env.GIT_CONFIG_VALUE_1).toBe(expected);
     });
 
     it('never includes the raw token value in any env entry', () => {
@@ -463,18 +484,24 @@ describe('git-clone', () => {
       }
     });
 
-    it('emits EXACTLY ONE header when a github token and an Azure PAT could both apply', () => {
-      // A token only injects for github.com (where isAzureDevOpsUrl is false),
-      // so the two never collide — guard the resolver directly anyway.
+    it('prefers the request token over the server Azure PAT', () => {
       const prev = process.env.AZURE_DEVOPS_PAT;
       process.env.AZURE_DEVOPS_PAT = 'azure-pat-xyz';
       try {
-        const env = buildGitEnv({}, { token: 'ghp_secret123', url: 'https://github.com/o/r' });
+        const env = buildGitEnv(
+          {},
+          { token: 'request-pat-123', url: 'https://dev.azure.com/org/project/_git/repo' },
+        );
         expect(env.GIT_CONFIG_COUNT).toBe('2');
         expect(env.GIT_CONFIG_VALUE_2).toBeUndefined();
         for (const value of Object.values(env)) {
           expect(String(value)).not.toContain('azure-pat-xyz');
         }
+        const expected =
+          'Authorization: Basic ' +
+          Buffer.from('x-access-token:request-pat-123').toString('base64');
+        expect(env.GIT_CONFIG_VALUE_0).toBe(expected);
+        expect(env.GIT_CONFIG_VALUE_1).toBe(expected);
       } finally {
         if (prev === undefined) delete process.env.AZURE_DEVOPS_PAT;
         else process.env.AZURE_DEVOPS_PAT = prev;
@@ -637,12 +664,10 @@ describe('git-clone', () => {
       expect(warnSpy).not.toHaveBeenCalled();
     });
 
-    it('does not warn over http:// when no credential is injected', () => {
+    it('warns over http:// for a non-GitHub provider when a request token is injected', () => {
       warnSpy.mockClear();
-      // gitlab host is not in the token allowlist and no Azure PAT is set,
-      // so nothing is injected — and nothing is warned about.
       buildGitEnv({}, { token: 'ghp_x', url: 'http://gitlab.com/o/r' });
-      expect(warnSpy).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledTimes(1);
     });
 
     it('warnIfInsecureAzureConfig warns for http AZURE_DEVOPS_URL, not https', () => {
