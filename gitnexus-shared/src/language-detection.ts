@@ -44,6 +44,7 @@ const EXTENSION_MAP: Record<SupportedLanguages, readonly string[]> = {
     '.cuh',
   ],
   [SupportedLanguages.CSharp]: ['.cs'],
+  [SupportedLanguages.Xpp]: ['.xpp'],
   [SupportedLanguages.Go]: ['.go'],
   [SupportedLanguages.Ruby]: ['.rb', '.rake', '.gemspec'],
   [SupportedLanguages.Rust]: ['.rs'],
@@ -80,6 +81,9 @@ export const isBladeTemplateFilename = (filePath: string): boolean =>
  */
 export const getLanguageFromFilename = (filename: string): SupportedLanguages | null => {
   if (isBladeTemplateFilename(filename)) return null;
+  if (/(?:^|\/)(?:AxClass|AxTable|AxForm)\/[^/]+\.xml$/i.test(filename.replace(/\\/g, '/'))) {
+    return SupportedLanguages.Xpp;
+  }
 
   // Fast path: check the extension map
   const lastDot = filename.lastIndexOf('.');
@@ -112,6 +116,7 @@ const SYNTAX_MAP: Record<SupportedLanguages, string> = {
   [SupportedLanguages.C]: 'c',
   [SupportedLanguages.CPlusPlus]: 'cpp',
   [SupportedLanguages.CSharp]: 'csharp',
+  [SupportedLanguages.Xpp]: 'csharp',
   [SupportedLanguages.Go]: 'go',
   [SupportedLanguages.Ruby]: 'ruby',
   [SupportedLanguages.Rust]: 'rust',

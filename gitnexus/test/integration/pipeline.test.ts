@@ -175,6 +175,60 @@ describe('pipeline end-to-end', () => {
 
 // ─── Pipeline error handling ──────────────────────────────────────────
 
+describe('Dynamics XML pipeline', () => {
+  it.each(['xml', 'xpp'])('creates X++ symbols and cross-file calls from %s sources', async (extension) => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gn-dynamics-xml-'));
+    const directory = extension === 'xml' ? 'Metadata/Hero/AxClass' : 'src';
+    const filePath = `${directory}/HeroLookup.${extension}`;
+    try {
+      await fs.mkdir(path.dirname(path.join(tmpDir, filePath)), { recursive: true });
+      const methods = `
+public void run() { this.normalize(); HeroService::save(); }
+public void normalize() { info("Hero"); }
+`;
+      const service = 'public static void save() { info("Saved"); }';
+      await fs.writeFile(path.join(tmpDir, filePath), extension === 'xml' ? `<AxClass><SourceCode>
+<Declaration><![CDATA[public class HeroLookup { }]]></Declaration>
+<Methods>
+<Method><Name>run</Name><Source><![CDATA[
+public void run() { this.normalize(); HeroService::save(); }
+]]></Source></Method>
+<Method><Name>normalize</Name><Source><![CDATA[
+public void normalize() { info("Hero"); }
+]]></Source></Method>
+</Methods></SourceCode></AxClass>` : `public class HeroLookup { ${methods} }`);
+      await fs.writeFile(path.join(tmpDir, directory, `HeroService.${extension}`), extension === 'xml'
+        ? `<AxClass><SourceCode><Declaration><![CDATA[public class HeroService { }]]></Declaration>
+<Methods><Method><Name>save</Name><Source><![CDATA[${service}]]></Source></Method></Methods>
+</SourceCode></AxClass>`
+        : `public class HeroService { ${service} }`);
+      const result = await runPipelineFromRepo(tmpDir, () => {});
+      const symbols: { label: string; name: string; filePath?: string }[] = [];
+      result.graph.forEachNode((node) => {
+        if (node.properties.filePath === filePath) {
+          symbols.push({ label: node.label, name: node.properties.name, filePath });
+        }
+      });
+      expect(symbols).toEqual(expect.arrayContaining([
+        expect.objectContaining({ label: 'Class', name: 'HeroLookup' }),
+        expect.objectContaining({ label: 'Method', name: 'run' }),
+        expect.objectContaining({ label: 'Method', name: 'normalize' }),
+      ]));
+      const calls = [...result.graph.iterRelationships()].filter((edge) => edge.type === 'CALLS');
+      expect(calls.some((edge) =>
+        result.graph.getNode(edge.sourceId)?.properties.name === 'run' &&
+        result.graph.getNode(edge.targetId)?.properties.name === 'normalize',
+      )).toBe(true);
+      expect(calls.some((edge) =>
+        result.graph.getNode(edge.sourceId)?.properties.name === 'run' &&
+        result.graph.getNode(edge.targetId)?.properties.name === 'save',
+      )).toBe(true);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  }, 60000);
+});
+
 describe('pipeline error handling', () => {
   it('returns empty result for non-existent repo path', async () => {
     const result = await runPipelineFromRepo('/nonexistent/path/xyz123', () => {});

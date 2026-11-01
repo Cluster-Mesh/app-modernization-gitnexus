@@ -510,6 +510,7 @@ const languageMap: Record<string, TreeSitterLanguage> = {
   ...(C ? { [SupportedLanguages.C]: C } : {}),
   [SupportedLanguages.CPlusPlus]: CPP,
   [SupportedLanguages.CSharp]: CSharp,
+  [SupportedLanguages.Xpp]: CSharp,
   [SupportedLanguages.Go]: Go,
   [SupportedLanguages.Rust]: Rust,
   ...(Kotlin ? { [SupportedLanguages.Kotlin]: Kotlin } : {}),

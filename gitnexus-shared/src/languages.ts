@@ -12,6 +12,7 @@ export enum SupportedLanguages {
   C = 'c',
   CPlusPlus = 'cpp',
   CSharp = 'csharp',
+  Xpp = 'xpp',
   Go = 'go',
   Ruby = 'ruby',
   Rust = 'rust',

@@ -410,6 +410,160 @@ describe('Tree-sitter multi-language parsing', () => {
     });
   });
 
+  describe('X++', () => {
+    it('preserves calls around X++ static access, transactions and select loops', async () => {
+      const code = `class Hero extends Common implements Runnable {
+public void run() {
+    ttsbegin;
+    while select customer where customer.RecId == 1 {
+        HeroService::save(customer, '');
+    }
+    ttscommit;
+}
+}`;
+      await loadLanguage(SupportedLanguages.Xpp, 'Hero.xpp');
+      const provider = getProvider(SupportedLanguages.Xpp);
+      const preprocessed = provider.preprocessSource!(code, 'Hero.xpp');
+      expect(preprocessed).toHaveLength(code.length);
+      const { tree, matches } = parseAndQuery(parser, preprocessed, provider.treeSitterQueries);
+      expect(tree.rootNode.hasError).toBe(false);
+      expect(extractCapturedCallNames(matches)).toContain('save');
+    });
+
+    it.each(['AxClass', 'AxTable', 'AxForm'])('recognizes %s metadata only', (kind) => {
+      expect(getLanguageFromFilename(`Metadata/Hero/${kind}/Hero.xml`)).toBe(SupportedLanguages.Xpp);
+      expect(getLanguageFromFilename(`Metadata\\Hero\\${kind}\\Hero.XML`)).toBe(SupportedLanguages.Xpp);
+      expect(getLanguageFromFilename('config/Other.xml')).toBeNull();
+    });
+
+    it('parses Dynamics XML forms with separate datasource owners and table inheritance', async () => {
+      const filePath = 'Metadata/Hero/AxForm/HeroForm.xml';
+      const code = `<AxForm><SourceCode>
+<Methods><Method><Name>classDeclaration</Name><Source><![CDATA[
+[Form]
+public class HeroForm extends FormRun { }
+]]></Source></Method></Methods>
+<DataSources>
+<DataSource><Name>Customers</Name><Methods><Method><Name>active</Name><Source><![CDATA[
+public int active() { return 1; }
+]]></Source></Method></Methods></DataSource>
+<DataSource><Name>Vendors</Name><Methods><Method><Name>active</Name><Source><![CDATA[
+public int active() { return 2; }
+]]></Source></Method></Methods></DataSource>
+</DataSources></SourceCode></AxForm>`;
+      await loadLanguage(SupportedLanguages.Xpp, filePath);
+      const provider = getProvider(SupportedLanguages.Xpp);
+      const preprocessed = provider.preprocessSource!(code, filePath);
+      expect(preprocessed).toHaveLength(code.length);
+      const { tree, matches } = parseAndQuery(parser, preprocessed, provider.treeSitterQueries);
+      expect(tree.rootNode.hasError).toBe(false);
+      expect(extractDefinitions(matches).map((definition) => definition.name)).toEqual(
+        expect.arrayContaining(['HeroForm', 'Customers', 'Vendors', 'active']),
+      );
+      const activeMethods = tree.rootNode.descendantsOfType('method_declaration');
+      expect(activeMethods).toHaveLength(2);
+      expect(activeMethods.map((method) => method.parent?.parent?.childForFieldName('name')?.text))
+        .toEqual(['Customers', 'Vendors']);
+    });
+
+    it('ignores malformed and DTD-bearing Dynamics XML without throwing', () => {
+      const provider = getProvider(SupportedLanguages.Xpp);
+      for (const code of ['<AxClass><SourceCode>', '<!DOCTYPE AxClass [<!ENTITY name "Hero">]><AxClass/>']) {
+        const result = provider.preprocessSource!(code, 'Metadata/Hero/AxClass/Hero.xml');
+        expect(result).toHaveLength(code.length);
+        expect(result.trim()).toBe('');
+      }
+    });
+
+    it.each(['\n', '\r\n'])('extracts methods from Dynamics XML preserving %j source lines', async (newline) => {
+      const filePath = 'Metadata/Hero/Hero/AxClass/HeroLookup.xml';
+      const code = `<?xml version="1.0" encoding="utf-8"?>
+<AxClass>
+  <Name>HeroLookup</Name>
+  <SourceCode>
+    <Declaration><![CDATA[
+public class HeroLookup
+{
+}
+]]></Declaration>
+    <Methods>
+      <Method><Name>run</Name><Source><![CDATA[
+public void run()
+{
+    CustTable customer;
+    select firstOnly customer where customer.RecId == 1;
+    this.normalize(customer);
+}
+]]></Source></Method>
+      <Method><Name>normalize</Name><Source><![CDATA[
+public void normalize(CustTable customer)
+{
+    info("Hero");
+}
+]]></Source></Method>
+    </Methods>
+  </SourceCode>
+</AxClass>`.replace(/\n/g, newline);
+
+      expect(getLanguageFromFilename(filePath)).toBe(SupportedLanguages.Xpp);
+      expect(getLanguageFromFilename('config/settings.xml')).toBeNull();
+      await loadLanguage(SupportedLanguages.Xpp, filePath);
+      const provider = getProvider(SupportedLanguages.Xpp);
+      const preprocessed = provider.preprocessSource!(code, filePath);
+      expect(preprocessed).toHaveLength(code.length);
+      expect([...preprocessed.matchAll(/\r|\n/g)].map((match) => match.index)).toEqual(
+        [...code.matchAll(/\r|\n/g)].map((match) => match.index),
+      );
+      const { tree, matches } = parseAndQuery(parser, preprocessed, provider.treeSitterQueries);
+      expect(tree.rootNode.hasError).toBe(false);
+      expect(extractDefinitions(matches).map((definition) => definition.name)).toEqual(
+        expect.arrayContaining(['HeroLookup', 'run', 'normalize']),
+      );
+      expect(extractCapturedCallNames(matches)).toContain('normalize');
+      const method = matches.flatMap((match) => match.captures).find(
+        (capture) => capture.name === 'name' && capture.node.text === 'run',
+      );
+      expect(method?.node.startPosition.row).toBe(code.slice(0, code.indexOf('public void run')).split('\n').length - 1);
+      expect(method?.node.startPosition.column).toBe('public void '.length);
+    });
+
+    it('recognizes .xpp and extracts declarations and calls around select statements', async () => {
+      const code = `
+        class HcmWorkerLookup {
+          public str findWorker(int _id) {
+            // select in comments must remain untouched
+            str queryText = "select firstOnly";
+            HcmWorker worker;
+            while select firstOnly worker where worker.RecId == _id;
+            return this.normalize(worker);
+          }
+
+          public HcmWorker normalize(HcmWorker _worker) {
+            return _worker;
+          }
+        }
+      `;
+
+      expect(getLanguageFromFilename('src/HcmWorker.xpp')).toBe(SupportedLanguages.Xpp);
+      await loadLanguage(SupportedLanguages.Xpp, 'src/HcmWorker.xpp');
+
+      const provider = getProvider(SupportedLanguages.Xpp);
+      const preprocessed = provider.preprocessSource!(code, 'src/HcmWorker.xpp');
+      expect(preprocessed).toHaveLength(code.length);
+      expect(preprocessed).toContain('// select in comments must remain untouched');
+      expect(preprocessed).toContain('"select firstOnly"');
+
+      const { tree, matches } = parseAndQuery(parser, preprocessed, provider.treeSitterQueries);
+      const definitions = extractDefinitions(matches);
+      const names = definitions.map((definition) => definition.name);
+
+      expect(tree.rootNode.hasError).toBe(false);
+      expect(names).toEqual(expect.arrayContaining(['HcmWorkerLookup', 'findWorker', 'normalize']));
+      expect(names).not.toContain('select');
+      expect(extractCapturedCallNames(matches)).toContain('normalize');
+    });
+  });
+
   describe('Rust', () => {
     it('parses fn, struct, impl, trait, and enum', async () => {
       await loadLanguage(SupportedLanguages.Rust);

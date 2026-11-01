@@ -91,6 +91,12 @@ const SOURCES: Record<string, GrammarSource> = {
       'C# parsing requires `tree-sitter-c-sharp/bindings/node/index.js`. ' +
       `If the subpath is missing, see ${ISSUES_URL}/1013.`,
   },
+  [SupportedLanguages.Xpp]: {
+    load: () => _require('tree-sitter-c-sharp/bindings/node/index.js'),
+    unavailableNote:
+      'X++ parsing requires the bundled `tree-sitter-c-sharp` compatibility grammar. ' +
+      'Check that its native binding installed cleanly (`npm ci`).',
+  },
   [SupportedLanguages.CPlusPlus]: {
     load: () => _require('tree-sitter-cpp'),
     unavailableNote:
