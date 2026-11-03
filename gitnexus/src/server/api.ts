@@ -800,12 +800,14 @@ export const handleQueryRequest = async (
   }
 };
 
+const MAX_ANALYZE_TOKEN_LENGTH = 4096;
+
 /**
  * Validate the optional `token` field of POST /api/analyze. Returns an
  * { status, error } to send, or null when the token is absent or valid.
  *
  * The token is provider-neutral for supported HTTP(S) Git remotes:
- * charset-restricted (blocks CRLF header smuggling), length-bounded (1–256),
+ * charset-restricted (blocks CRLF header smuggling), length-bounded (1–4096),
  * and accepted for any valid HTTP(S) URL. `cloneOrPull` performs the
  * transport/SSRF validation before invoking Git, so this function does not
  * maintain a provider-specific host allowlist. An optional `username` selects
@@ -826,8 +828,12 @@ export function validateAnalyzeToken(
     return null;
   }
   if (typeof repoToken !== 'string') return { status: 400, error: '"token" must be a string' };
-  if (repoToken.length === 0 || repoToken.length > 256)
-    return { status: 400, error: '"token" length must be between 1 and 256' };
+  // GitHub App installation tokens no longer fit in 256 chars (~380 today).
+  if (repoToken.length === 0 || repoToken.length > MAX_ANALYZE_TOKEN_LENGTH)
+    return {
+      status: 400,
+      error: `"token" length must be between 1 and ${MAX_ANALYZE_TOKEN_LENGTH}`,
+    };
   if (!/^[A-Za-z0-9._~+/=-]+$/.test(repoToken))
     return { status: 400, error: '"token" contains invalid characters' };
   if (repoUsername !== undefined) {

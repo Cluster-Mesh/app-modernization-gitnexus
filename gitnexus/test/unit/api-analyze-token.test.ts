@@ -49,10 +49,15 @@ describe('validateAnalyzeToken', () => {
   });
 
   it('rejects an empty or over-long token', () => {
-    expect(validateAnalyzeToken('', GH)?.error).toBe('"token" length must be between 1 and 256');
-    expect(validateAnalyzeToken('a'.repeat(257), GH)?.error).toBe(
-      '"token" length must be between 1 and 256',
+    expect(validateAnalyzeToken('', GH)?.error).toBe('"token" length must be between 1 and 4096');
+    expect(validateAnalyzeToken('a'.repeat(4097), GH)?.error).toBe(
+      '"token" length must be between 1 and 4096',
     );
+  });
+
+  it('accepts long GitHub App installation tokens (new ghs_ format > 256 chars)', () => {
+    expect(validateAnalyzeToken(`ghs_${'A1b2_C3.d4-'.repeat(35)}`, GH)).toBeNull();
+    expect(validateAnalyzeToken('a'.repeat(4096), GH)).toBeNull();
   });
 
   it('rejects a token with characters that could smuggle a header (CRLF/space/colon)', () => {
