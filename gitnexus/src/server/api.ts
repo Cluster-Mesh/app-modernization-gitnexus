@@ -800,6 +800,26 @@ export const handleQueryRequest = async (
   }
 };
 
+/**
+ * Branch label to pin the analyze worker to.
+ *
+ * A server-owned clone (POST /api/analyze with `url`) has a single working
+ * tree that `cloneOrPull` has already checked out on the requested branch, so
+ * it is indexed into the flat (primary) slot: the requested branch replaces
+ * the previously indexed one, and a now-shadowed `branches/<slug>/` sub-index
+ * is dropped by the analyzer. Pinning it to a sub-index instead would leave
+ * the repo's primary index — the one groups and unscoped queries read — on
+ * the branch of the first clone. Caller-supplied paths keep explicit pinning.
+ *
+ * Exported for unit tests.
+ */
+export function analyzeWorkerBranch(
+  branch: string | undefined,
+  serverOwnedClone: boolean,
+): string | undefined {
+  return serverOwnedClone ? undefined : branch;
+}
+
 const MAX_ANALYZE_TOKEN_LENGTH = 4096;
 
 /**
@@ -2173,7 +2193,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
               sbom,
               sbomTimeout,
               syftPath,
-              branch,
+              branch: analyzeWorkerBranch(branch, !!repoUrl && !repoLocalPath),
             });
           } catch (err: any) {
             if (targetPath) releaseRepoLock(getStoragePath(targetPath));
