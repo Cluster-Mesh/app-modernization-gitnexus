@@ -20,6 +20,7 @@ import {
   validateGitUrl,
   cloneOrPull,
   buildCloneArgs,
+  buildBranchSwitchArgs,
   buildGitEnv,
   normalizeGitUrlForCompare,
   assertRemoteMatchesRequestedUrl,
@@ -868,6 +869,75 @@ describe('git-clone', () => {
       } finally {
         await fs.rm(noRemoteDir, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe('buildBranchSwitchArgs', () => {
+    const git = (args: string[], cwd: string): Promise<string> =>
+      new Promise((resolve, reject) => {
+        const proc = spawn('git', args, {
+          cwd,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            GIT_TERMINAL_PROMPT: '0',
+            GIT_AUTHOR_NAME: 'test',
+            GIT_AUTHOR_EMAIL: 'test@example.com',
+            GIT_COMMITTER_NAME: 'test',
+            GIT_COMMITTER_EMAIL: 'test@example.com',
+          },
+        });
+        let out = '';
+        let err = '';
+        proc.stdout.on('data', (chunk: Buffer) => (out += chunk));
+        proc.stderr.on('data', (chunk: Buffer) => (err += chunk));
+        proc.on('close', (code) =>
+          code === 0 ? resolve(out.trim()) : reject(new Error(`git ${args[0]}: ${err.trim()}`)),
+        );
+        proc.on('error', reject);
+      });
+    const switchTo = async (branch: string, cwd: string) => {
+      for (const args of buildBranchSwitchArgs(branch)) await git(args, cwd);
+      await git(['pull', '--ff-only'], cwd);
+    };
+    let root: string;
+    let clone: string;
+
+    beforeAll(async () => {
+      root = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-branch-switch-'));
+      const source = path.join(root, 'source');
+      await fs.mkdir(source);
+      await git(['init', '--quiet', '--initial-branch', 'main'], source);
+      await git(['commit', '--quiet', '--allow-empty', '-m', 'main'], source);
+      await git(['checkout', '--quiet', '-b', 'Migration_dev/Sc104'], source);
+      await git(['commit', '--quiet', '--allow-empty', '-m', 'feature'], source);
+      await git(['checkout', '--quiet', 'main'], source);
+      clone = path.join(root, 'clone');
+      // Same shape as the server's initial clone: shallow, hence single-branch.
+      await git(['clone', '--quiet', '--depth', '1', `file://${source}`, clone], root);
+    });
+
+    afterAll(async () => {
+      await fs.rm(root, { recursive: true, force: true });
+    });
+
+    it('switches a shallow single-branch clone to another branch that tracks origin', async () => {
+      await switchTo('Migration_dev/Sc104', clone);
+      expect(await git(['log', '-1', '--format=%s'], clone)).toBe('feature');
+      expect(await git(['rev-parse', '--abbrev-ref', '@{u}'], clone)).toBe(
+        'origin/Migration_dev/Sc104',
+      );
+    });
+
+    it('is idempotent and can switch back to the first branch', async () => {
+      await switchTo('Migration_dev/Sc104', clone);
+      await switchTo('main', clone);
+      expect(await git(['log', '-1', '--format=%s'], clone)).toBe('main');
+      const refspecs = await git(['config', '--get-all', 'remote.origin.fetch'], clone);
+      expect(refspecs.split('\n').sort()).toEqual([
+        '+refs/heads/Migration_dev/Sc104:refs/remotes/origin/Migration_dev/Sc104',
+        '+refs/heads/main:refs/remotes/origin/main',
+      ]);
     });
   });
 

@@ -313,6 +313,26 @@ export function buildCloneArgs(url: string, targetDir: string, branch?: string):
 }
 
 /**
+ * Git commands that move an existing clone onto `branch`, run in order.
+ *
+ * `git clone --depth 1` implies `--single-branch`, so `remote.origin.fetch`
+ * only maps the branch cloned first: fetching another branch filled FETCH_HEAD
+ * without creating `origin/<branch>`, and the checkout failed with
+ * "'origin/<branch>' is not a commit". The branch refspec is registered first
+ * (`--replace-all --fixed-value` rewrites an identical line instead of
+ * appending a duplicate on every re-index), so the fetch creates the
+ * remote-tracking ref and the checkout tracks it for `git pull --ff-only`.
+ */
+export function buildBranchSwitchArgs(branch: string): string[][] {
+  const refspec = `+refs/heads/${branch}:refs/remotes/origin/${branch}`;
+  return [
+    ['config', '--replace-all', '--fixed-value', 'remote.origin.fetch', refspec, refspec],
+    ['fetch', '--prune', 'origin', branch],
+    ['checkout', '--force', '-B', branch, `origin/${branch}`],
+  ];
+}
+
+/**
  * Normalize a git URL into a comparable form.
  *
  * Two URLs are considered the same repository when their normalized forms
@@ -487,16 +507,13 @@ export async function cloneOrPull(
     await assertRemoteMatchesRequestedUrl(safeTarget, url);
     onProgress?.({ phase: 'pulling', message: 'Pulling latest changes...' });
     if (options?.branch) {
-      await runGit(['fetch', '--prune', 'origin', options.branch], safeTarget, {
-        token: options.token,
-        username: options.username,
-        url,
-      });
-      await runGit(
-        ['checkout', '--force', '-B', options.branch, `origin/${options.branch}`],
-        safeTarget,
-        { token: options.token, username: options.username, url },
-      );
+      for (const args of buildBranchSwitchArgs(options.branch)) {
+        await runGit(args, safeTarget, {
+          token: options.token,
+          username: options.username,
+          url,
+        });
+      }
     }
     await runGit(['pull', '--ff-only'], safeTarget, {
       token: options?.token,
