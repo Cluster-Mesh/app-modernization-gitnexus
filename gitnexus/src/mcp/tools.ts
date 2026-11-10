@@ -378,7 +378,8 @@ SAFETY / LIMITS:
 - Reads only files inside the indexed repository root.
 - Rejects path traversal and internal Git metadata paths (for example .git/ and .gitnexus/).
 - Intended for text files only; binary files are rejected.
-- Line range is bounded to keep MCP responses small.
+- Line range is bounded to keep MCP responses small (at most 1000 lines and 256 KB per call).
+- Large files (up to 25 MB) are readable: page through them with start_line/end_line.
 `,
     annotations: READ_ONLY_TOOL_ANNOTATIONS,
     inputSchema: {

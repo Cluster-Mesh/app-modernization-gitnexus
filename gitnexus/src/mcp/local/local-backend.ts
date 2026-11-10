@@ -470,7 +470,47 @@ interface RepoHandle {
 
 const READ_REPO_FILE_DEFAULT_LINES = 200;
 const READ_REPO_FILE_MAX_LINES = 1000;
+/** Upper bound of the returned window, not of the file: large generated sources stay readable in slices. */
 const READ_REPO_FILE_MAX_BYTES = 256 * 1024;
+/** Safety cap on the file read from disk (same as the per-file upload limit). */
+const READ_REPO_FILE_MAX_FILE_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Lines `startLine..endLine` (1-based, inclusive) of `content`, cut so the returned text stays within
+ * `maxBytes`. A single line longer than the budget is returned truncated (`lineTruncated`).
+ */
+export function selectRepoFileWindow(
+  content: string,
+  startLine: number,
+  endLine: number,
+  maxBytes: number = READ_REPO_FILE_MAX_BYTES,
+): { lines: string[]; totalLines: number; endLine: number; byteLimited: boolean; lineTruncated: boolean } {
+  const all = content.split(/\r?\n/);
+  const selected: string[] = [];
+  let used = 0;
+  let byteLimited = false;
+  let lineTruncated = false;
+  for (const line of all.slice(startLine - 1, endLine)) {
+    const size = Buffer.byteLength(line, 'utf8') + (selected.length ? 1 : 0);
+    if (used + size > maxBytes) {
+      byteLimited = true;
+      if (!selected.length) {
+        selected.push(Buffer.from(line, 'utf8').subarray(0, maxBytes).toString('utf8').replace(/\uFFFD$/, ''));
+        lineTruncated = true;
+      }
+      break;
+    }
+    selected.push(line);
+    used += size;
+  }
+  return {
+    lines: selected,
+    totalLines: all.length,
+    endLine: startLine + Math.max(selected.length - 1, 0),
+    byteLimited,
+    lineTruncated,
+  };
+}
 
 function isPathInside(parent: string, child: string): boolean {
   const rel = path.relative(parent, child);
@@ -3547,9 +3587,9 @@ export class LocalBackend {
       return { error: `Requested path '${requestedPath}' is not a regular file.` };
     }
 
-    if (stat.size > READ_REPO_FILE_MAX_BYTES) {
+    if (stat.size > READ_REPO_FILE_MAX_FILE_BYTES) {
       return {
-        error: `File '${requestedPath}' is too large (${stat.size} bytes). Max supported size is ${READ_REPO_FILE_MAX_BYTES} bytes.`,
+        error: `File '${requestedPath}' is too large (${stat.size} bytes). Max supported size is ${READ_REPO_FILE_MAX_FILE_BYTES} bytes.`,
       };
     }
 
@@ -3565,19 +3605,22 @@ export class LocalBackend {
       return { error: `Unable to read file '${requestedPath}': ${message}` };
     }
 
-    const lines = content.split(/\r?\n/);
-    const selected = lines.slice(startLine - 1, endLine);
-    const effectiveEndLine = startLine + Math.max(selected.length - 1, 0);
+    const window = selectRepoFileWindow(content, startLine, endLine);
 
     return {
       repo: repo.name,
       path: requestedPath,
       filePath: resolvedPath,
       startLine,
-      endLine: effectiveEndLine,
-      totalLines: lines.length,
-      truncated: effectiveEndLine < lines.length,
-      content: selected.join('\n'),
+      endLine: window.endLine,
+      totalLines: window.totalLines,
+      truncated: window.endLine < window.totalLines || window.lineTruncated,
+      ...(window.byteLimited
+        ? {
+            note: `Window cut at ${READ_REPO_FILE_MAX_BYTES} bytes${window.lineTruncated ? ' (line truncated)' : ''}: continue from start_line ${window.endLine + 1}.`,
+          }
+        : {}),
+      content: window.lines.join('\n'),
     };
   }
 
