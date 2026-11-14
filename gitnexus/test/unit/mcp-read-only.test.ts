@@ -9,6 +9,7 @@ const READ_ONLY_TOOLS = [
   'check',
   'context',
   'detect_changes',
+  'download_repo_file',
   'explain',
   'get_sbom',
   'impact',

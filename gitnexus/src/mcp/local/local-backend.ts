@@ -474,6 +474,52 @@ const READ_REPO_FILE_MAX_LINES = 1000;
 const READ_REPO_FILE_MAX_BYTES = 256 * 1024;
 /** Safety cap on the file read from disk (same as the per-file upload limit). */
 const READ_REPO_FILE_MAX_FILE_BYTES = 25 * 1024 * 1024;
+/** Raw bytes per download_repo_file call: base64 keeps each MCP response under ~3 MB. */
+const DOWNLOAD_REPO_FILE_DEFAULT_CHUNK_BYTES = 2 * 1024 * 1024;
+const DOWNLOAD_REPO_FILE_MAX_CHUNK_BYTES = 4 * 1024 * 1024;
+
+const REPO_FILE_MIME_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.ico': 'image/x-icon',
+  '.svg': 'image/svg+xml',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff',
+  '.pdf': 'application/pdf',
+  '.zip': 'application/zip',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.doc': 'application/msword',
+  '.xls': 'application/vnd.ms-excel',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+  '.eot': 'application/vnd.ms-fontobject',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.json': 'application/json',
+  '.xml': 'application/xml',
+  '.html': 'text/html',
+  '.htm': 'text/html',
+  '.css': 'text/css',
+  '.js': 'text/javascript',
+  '.txt': 'text/plain',
+  '.md': 'text/markdown',
+  '.csv': 'text/csv',
+};
+
+export function guessRepoFileMimeType(filePath: string): string {
+  return REPO_FILE_MIME_TYPES[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream';
+}
 
 /**
  * Lines `startLine..endLine` (1-based, inclusive) of `content`, cut so the returned text stays within
@@ -1914,6 +1960,8 @@ export class LocalBackend {
         return this.context(repo, p);
       case 'read_repo_file':
         return this.readRepoFile(repo, p);
+      case 'download_repo_file':
+        return this.downloadRepoFile(repo, p);
       case 'explain':
         return this.explain(repo, p);
       case 'pdg_query':
@@ -3621,6 +3669,89 @@ export class LocalBackend {
           }
         : {}),
       content: window.lines.join('\n'),
+    };
+  }
+
+  /**
+   * Raw bytes of any repository file (images, fonts, PDF, Office documents...) as base64 chunks.
+   * Same path guardrails as read_repo_file; callers reassemble chunks via `next_offset` and verify `sha256`.
+   */
+  private async downloadRepoFile(
+    repo: RepoHandle,
+    params: {
+      path?: string;
+      offset?: number;
+      length?: number;
+    },
+  ): Promise<any> {
+    const requestedPath = normalizeRepoRelativeFilePath(params.path);
+    if (!requestedPath) {
+      return {
+        error:
+          'Invalid "path": expected a non-empty repository-relative path without traversal and outside .git/.gitnexus.',
+      };
+    }
+
+    const offset = params.offset === undefined ? 0 : Number(params.offset);
+    if (!Number.isInteger(offset) || offset < 0) {
+      return {
+        error: `Invalid "offset": expected an integer >= 0, got ${JSON.stringify(params.offset)}.`,
+      };
+    }
+    const requestedLength =
+      params.length === undefined ? DOWNLOAD_REPO_FILE_DEFAULT_CHUNK_BYTES : Number(params.length);
+    if (!Number.isInteger(requestedLength) || requestedLength < 1) {
+      return {
+        error: `Invalid "length": expected an integer >= 1, got ${JSON.stringify(params.length)}.`,
+      };
+    }
+    const length = Math.min(requestedLength, DOWNLOAD_REPO_FILE_MAX_CHUNK_BYTES);
+
+    const repoRoot = tryRealpath(repo.repoPath);
+    const absolutePath = path.resolve(repoRoot, requestedPath);
+    const resolvedPath = tryRealpath(absolutePath);
+    if (!isPathInside(repoRoot, resolvedPath)) {
+      return { error: 'Requested path resolves outside the indexed repository root.' };
+    }
+
+    let raw: Buffer;
+    try {
+      const stat = await fs.stat(resolvedPath);
+      if (!stat.isFile()) {
+        return { error: `Requested path '${requestedPath}' is not a regular file.` };
+      }
+      if (stat.size > READ_REPO_FILE_MAX_FILE_BYTES) {
+        return {
+          error: `File '${requestedPath}' is too large (${stat.size} bytes). Max supported size is ${READ_REPO_FILE_MAX_FILE_BYTES} bytes.`,
+        };
+      }
+      raw = await fs.readFile(resolvedPath);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { error: `Unable to read file '${requestedPath}': ${message}` };
+    }
+
+    if (offset > raw.length) {
+      return {
+        error: `Invalid "offset": ${offset} is beyond the file size (${raw.length} bytes).`,
+      };
+    }
+    const chunk = raw.subarray(offset, offset + length);
+    const nextOffset = offset + chunk.length;
+    const complete = nextOffset >= raw.length;
+
+    return {
+      repo: repo.name,
+      path: requestedPath,
+      size: raw.length,
+      sha256: createHash('sha256').update(raw).digest('hex'),
+      mimeType: guessRepoFileMimeType(requestedPath),
+      encoding: 'base64',
+      offset,
+      length: chunk.length,
+      complete,
+      next_offset: complete ? null : nextOffset,
+      content: chunk.toString('base64'),
     };
   }
 

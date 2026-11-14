@@ -22,7 +22,7 @@ const OPEN_WORLD_READ_ONLY_TOOLS = new Set(['query']);
 
 describe('GITNEXUS_TOOLS', () => {
   it('exports all tools (including get_sbom and group tools)', () => {
-    expect(GITNEXUS_TOOLS).toHaveLength(19);
+    expect(GITNEXUS_TOOLS).toHaveLength(20);
   });
 
   it('contains all expected tool names', () => {
@@ -42,6 +42,8 @@ describe('GITNEXUS_TOOLS', () => {
         'api_impact',
         'trace',
         'get_sbom',
+        'read_repo_file',
+        'download_repo_file',
       ]),
     );
   });

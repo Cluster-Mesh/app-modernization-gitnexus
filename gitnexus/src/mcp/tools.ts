@@ -414,6 +414,51 @@ SAFETY / LIMITS:
     },
   },
   {
+    name: 'download_repo_file',
+    description: `Download the raw bytes of any file (images, icons, fonts, PDF, Office documents, archives or text) from the indexed repository worktree, base64-encoded.
+
+WHEN TO USE: You need an asset or binary file that read_repo_file rejects (for example logo.png, a .docx template or a .pdf), or the exact bytes of a text file.
+AFTER THIS: Decode "content" from base64. If "complete" is false, call again with offset = next_offset and concatenate the chunks; verify the result against "sha256".
+
+SAFETY / LIMITS:
+- Same path rules as read_repo_file: repository-relative paths only, no traversal, no .git/ or .gitnexus/.
+- Files up to 25 MB; each call returns at most 4 MB of raw bytes (default 2 MB).
+`,
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description:
+            'Repository-relative POSIX-style file path to download (for example: assets/logo.png).',
+          minLength: 1,
+        },
+        offset: {
+          type: 'integer',
+          description:
+            'Byte offset of the chunk to return (default: 0). Use next_offset from the previous call.',
+          default: 0,
+          minimum: 0,
+        },
+        length: {
+          type: 'integer',
+          description: 'Maximum raw bytes to return in this chunk (default 2097152, max 4194304).',
+          minimum: 1,
+        },
+        repo: {
+          type: 'string',
+          description: 'Repository name or path. Omit if only one repo is indexed.',
+        },
+        branch: {
+          type: 'string',
+          description: 'Indexed branch selector (optional; defaults to the workspace index).',
+        },
+      },
+      required: ['path'],
+    },
+  },
+  {
     name: 'detect_changes',
     description: `Analyze uncommitted git changes and find affected execution flows.
 Maps git diff hunks to indexed symbols, then traces which processes are impacted.
